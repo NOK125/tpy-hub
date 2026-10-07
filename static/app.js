@@ -216,9 +216,9 @@ async function dashboardView() {
     `<button class="stat ${attn ? "attn" : ""}" ${tab ? `data-act="go" data-id="${tab}"` : ""}><b>${value}</b><span>${label}</span></button>`;
   const maxLevel = Math.max(1, ...d.by_level.map((r) => r.n));
   view.innerHTML = `
-    <div class="print-only print-head"><h1>สรุปภาพรวมงานบุคคล โรงพยาบาลตาพระยา</h1>
+    <div class="print-only print-head"><h1>Dashboard งานบุคคล โรงพยาบาลตาพระยา</h1>
       <p>ปีงบประมาณ ${d.fiscal_year} · ข้อมูล ณ วันที่ ${when(d.generated_at)}</p></div>
-    <div class="toolbar no-print"><h2>ภาพรวม</h2>
+    <div class="toolbar no-print"><h2>Dashboard</h2>
       ${yearSelect(d.years, d.fiscal_year)}
       <a class="btn" href="/api/export/dashboard.xlsx?year=${d.fiscal_year}">ดาวน์โหลด Excel</a>
       <button class="btn" data-act="pdf">ดาวน์โหลด PDF</button>
@@ -623,17 +623,34 @@ async function accountView() {
 
 // ---------- เข้าสู่ระบบ ----------
 
-function authCard(title, intro, fields, submitLabel, onSubmit) {
+const LOGO_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c.9-3.6 3.6-5.6 7-5.6s6.1 2 7 5.6"/></svg>`;
+
+function authCard(title, intro, fields, submitLabel, onSubmit, tip = "") {
   document.body.classList.add("auth");
   $("#tabs").innerHTML = "";
   $("#userbox").innerHTML = "";
   view.onclick = null;
-  view.innerHTML = `<form class="card auth-card" id="auth-form">
-      <h2>${title}</h2>${intro}
+  const feature = (icon, text) => `<li><span>${ICONS[icon]}</span>${text}</li>`;
+  view.innerHTML = `<div class="auth-wrap">
+    <aside class="auth-brand">
+      <div class="logo">${LOGO_SVG}</div>
+      <h1>TPY HR</h1>
+      <p>ระบบงานบุคคล โรงพยาบาลตาพระยา</p>
+      <ul>
+        ${feature("plans", "แผนพัฒนาบุคลากรและการใช้งบ")}
+        ${feature("doc", "คำสั่ง รายงานการประชุม และเอกสาร")}
+        ${feature("health", "กิจกรรมตรวจสุขภาพประจำปี")}
+        ${feature("clinic", "HR Clinic ถามตอบกับงานบุคคล")}
+      </ul>
+    </aside>
+    <form class="auth-form" id="auth-form">
+      <h2>${title}</h2><p class="sub">${intro}</p>
       <div class="fields">${fields.map((f) => fieldHtml(f)).join("")}</div>
       <p class="form-error" hidden></p>
       <button type="submit" class="btn primary block">${submitLabel}</button>
-    </form>`;
+      ${tip ? `<p class="tip">${tip}</p>` : ""}
+    </form>
+  </div>`;
   const form = $("#auth-form");
   $("input", form).focus();
   form.onsubmit = async (e) => {
@@ -657,17 +674,17 @@ const NID_FIELD = { name: "national_id", label: "เลขบัตรประ�
   autocomplete: "username", maxlength: 17, placeholder: "x-xxxx-xxxxx-xx-x" };
 
 function loginScreen() {
-  authCard("เข้าสู่ระบบ", `<p class="hint">ใช้เลขบัตรประชาชน 13 หลัก ครั้งแรกให้ใส่รหัสผ่านเป็นเลขบัตร 5 ตัวท้าย</p>`,
+  authCard("เข้าสู่ระบบ", "ยินดีต้อนรับ กรุณาเข้าสู่ระบบด้วยเลขบัตรประชาชน",
     [NID_FIELD, { name: "password", label: "รหัสผ่าน", type: "password", required: true, autocomplete: "current-password" }],
     "เข้าสู่ระบบ",
     async (d) => {
       me = await api("POST", "/login", d);
       startApp(d.password);
-    });
+    }, "เข้าใช้งานครั้งแรก ใช้รหัสผ่านเป็นเลขบัตรประชาชน 5 ตัวท้าย ลืมรหัสผ่านติดต่องานบุคคล");
 }
 
 function setupScreen() {
-  authCard("ตั้งค่าระบบครั้งแรก", `<p class="hint">สร้างบัญชีผู้ดูแลระบบ (HR) คนแรก จากนั้นนำเข้ารายชื่อบุคลากรจาก Excel ได้ในเมนู "ผู้ใช้งาน"</p>`,
+  authCard("ตั้งค่าระบบครั้งแรก", "สร้างบัญชีผู้ดูแลระบบ (HR) คนแรก จากนั้นนำเข้ารายชื่อบุคลากรได้ในเมนู \"ผู้ใช้งาน\"",
     [NID_FIELD, { name: "prefix", label: "คำนำหน้า" }, { name: "first_name", label: "ชื่อ", required: true },
       { name: "last_name", label: "นามสกุล", required: true }, { name: "position", label: "ตำแหน่ง" },
       { name: "password", label: "รหัสผ่าน", type: "password", required: true, autocomplete: "new-password",
@@ -680,7 +697,7 @@ function setupScreen() {
 }
 
 function forceChangeScreen(oldPassword) {
-  authCard("ตั้งรหัสผ่านใหม่", `<p class="hint">สวัสดี ${esc(me.full_name)} กรุณาตั้งรหัสผ่านใหม่ก่อนเริ่มใช้งาน</p>`,
+  authCard("ตั้งรหัสผ่านใหม่", `สวัสดี ${esc(me.full_name)} กรุณาตั้งรหัสผ่านใหม่ก่อนเริ่มใช้งาน`,
     passwordFields(Boolean(oldPassword)), "บันทึกรหัสผ่านและเข้าใช้งาน",
     async (d) => {
       await submitPassword(d, oldPassword);
@@ -689,18 +706,33 @@ function forceChangeScreen(oldPassword) {
     });
 }
 
+// ไอคอนเมนู (เส้น ใช้สีตามตัวอักษร)
+const icon = (d) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICONS = {
+  dashboard: icon('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
+  plans: icon('<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>'),
+  doc: icon('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>'),
+  order: icon('<path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1z"/><path d="M16 5h2a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2"/><path d="M9 12l2 2 4-4"/>'),
+  health: icon('<path d="M20.8 5.6a5 5 0 0 0-7.1 0L12 7.3l-1.7-1.7a5 5 0 0 0-7.1 7.1L12 21.5l8.8-8.8a5 5 0 0 0 0-7.1z"/><path d="M7 12h2l1.5-2.5L13 15l1.5-3H17"/>'),
+  meeting: icon('<circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2.5 19c.6-2.8 2.8-4.5 5.5-4.5s4.9 1.7 5.5 4.5M12.5 15c.9-.3 2.2-.5 3.5-.5 2.7 0 4.9 1.7 5.5 4.5"/>'),
+  clinic: icon('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.9A8 8 0 1 1 21 12z"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5M12 16.5h.01"/>'),
+  other: icon('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  users: icon('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.7-3.4 3.3-5.5 6.5-5.5s5.8 2.1 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.6.8 2.7 2.6 3 5.2"/>'),
+  account: icon('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 18.5c1.2-2 3.1-3 5.5-3s4.3 1 5.5 3"/>'),
+};
+
 // ---------- เมนูและการสลับหน้า ----------
 
 const VIEWS = {
-  dashboard: ["ภาพรวม", dashboardView],
-  plans: ["แผนพัฒนาบุคลากร", plansView],
-  "doc-order": ["คำสั่ง", documentsView("order")],
-  "doc-health": ["ตรวจสุขภาพประจำปี", documentsView("health")],
-  "doc-meeting": ["รายงานการประชุม", documentsView("meeting")],
-  clinic: ["HR Clinic", clinicView],
-  "doc-other": ["เอกสารอื่น ๆ", documentsView("other")],
-  users: ["ผู้ใช้งาน", usersView, "admin"],
-  account: ["บัญชีของฉัน", accountView],
+  dashboard: ["Dashboard", dashboardView, null, "dashboard"],
+  plans: ["แผนพัฒนาบุคลากร", plansView, null, "plans"],
+  "doc-order": ["คำสั่ง", documentsView("order"), null, "order"],
+  "doc-health": ["ตรวจสุขภาพประจำปี", documentsView("health"), null, "health"],
+  "doc-meeting": ["รายงานการประชุม", documentsView("meeting"), null, "meeting"],
+  clinic: ["HR Clinic", clinicView, null, "clinic"],
+  "doc-other": ["เอกสารอื่น ๆ", documentsView("other"), null, "other"],
+  users: ["ผู้ใช้งาน", usersView, "admin", "users"],
+  account: ["บัญชีของฉัน", accountView, null, "account"],
 };
 const allowed = (key) => !VIEWS[key][2] || me?.role === VIEWS[key][2];
 let current = null;
@@ -712,7 +744,7 @@ async function show(tab) {
   if (dlg.open) dlg.close();
   if (location.hash !== "#" + tab) history.replaceState(null, "", "#" + tab);
   $("#tabs").innerHTML = Object.entries(VIEWS).filter(([k]) => allowed(k))
-    .map(([key, [text]]) => `<button data-tab="${key}" ${key === tab ? 'aria-current="page"' : ""}>${text}</button>`).join("");
+    .map(([key, [text, , , ic]]) => `<button data-tab="${key}" ${key === tab ? 'aria-current="page"' : ""}>${ICONS[ic]}<span>${text}</span></button>`).join("");
   try {
     await VIEWS[tab][1]();
   } catch (e) {
