@@ -623,8 +623,6 @@ async function accountView() {
 
 // ---------- เข้าสู่ระบบ ----------
 
-const LOGO_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c.9-3.6 3.6-5.6 7-5.6s6.1 2 7 5.6"/></svg>`;
-
 function authCard(title, intro, fields, submitLabel, onSubmit, tip = "") {
   document.body.classList.add("auth");
   $("#tabs").innerHTML = "";
@@ -633,8 +631,8 @@ function authCard(title, intro, fields, submitLabel, onSubmit, tip = "") {
   const feature = (icon, text) => `<li><span>${ICONS[icon]}</span>${text}</li>`;
   view.innerHTML = `<div class="auth-wrap">
     <aside class="auth-brand">
-      <div class="logo">${LOGO_SVG}</div>
-      <h1>TPY HR</h1>
+      <div class="hosp-logo big"><img src="logo.png" alt="โรงพยาบาลตาพระยา"></div>
+      <h1>ระบบงานบุคคล</h1>
       <p>ระบบงานบุคคล โรงพยาบาลตาพระยา</p>
       <ul>
         ${feature("plans", "แผนพัฒนาบุคลากรและการใช้งบ")}

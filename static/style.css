@@ -20,6 +20,7 @@
   --on-brand: #ffffff;
   --on-brand-soft: #ffffffcc;
   --shadow: 0 10px 30px #be185d1f;
+  --logo-bg: #ffffff;
   --radius: 12px;
   color-scheme: light;
 }
@@ -46,6 +47,7 @@
     --on-brand: #fdf2f8;
     --on-brand-soft: #fdf2f8bb;
     --shadow: 0 10px 30px #00000066;
+    --logo-bg: #ffffff;
     color-scheme: dark;
   }
 }
@@ -69,9 +71,12 @@ small, .muted { color: var(--muted); }
   border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: .55rem; font-weight: 700; font-size: 1.15rem; color: var(--primary); }
-.brand .logo { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--brand-from), var(--brand-to)); color: var(--on-brand); }
-.brand .logo svg { width: 20px; height: 20px; }
+/* โลโก้โรงพยาบาลวางบนการ์ดสีขาวเสมอ (สีโลโก้เดิมจะได้ชัดทั้งบนพื้นชมพูและโหมดมืด) */
+.hosp-logo { flex: none; display: inline-flex; align-items: center; background: var(--logo-bg); border-radius: 10px; padding: 4px 8px; box-shadow: var(--shadow); }
+.hosp-logo img { display: block; height: 30px; width: auto; }
+.hosp-logo.big { padding: .6rem .9rem; border-radius: 14px; margin-bottom: 1.3rem; }
+.hosp-logo.big img { height: 64px; }
+.brand-text small { margin-left: .35rem; }
 .brand small { font-weight: 400; color: var(--muted); }
 #tabs { display: flex; gap: .25rem; flex: 1; overflow-x: auto; scrollbar-width: thin; }
 #tabs button { white-space: nowrap; display: inline-flex; align-items: center; gap: .55rem; }
@@ -247,8 +252,6 @@ body.auth main { max-width: 980px; display: grid; place-items: center; min-heigh
 }
 .auth-brand::before { width: 260px; height: 260px; right: -90px; top: -80px; }
 .auth-brand::after { width: 180px; height: 180px; left: -60px; bottom: -70px; }
-.auth-brand .logo { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: #ffffff2e; margin-bottom: 1.4rem; }
-.auth-brand .logo svg { width: 32px; height: 32px; }
 .auth-brand h1 { font-size: 1.7rem; margin: 0 0 .3rem; }
 .auth-brand p { margin: 0 0 1.6rem; color: var(--on-brand-soft); }
 .auth-brand ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .7rem; position: relative; }
@@ -266,24 +269,37 @@ body.auth main { max-width: 980px; display: grid; place-items: center; min-heigh
   .auth-brand { padding: 1.6rem 1.4rem; }
   .auth-brand ul { display: none; }
   .auth-brand p { margin-bottom: 0; }
-  .auth-brand .logo { width: 46px; height: 46px; margin-bottom: .9rem; }
+  .hosp-logo.big img { height: 48px; }
   .auth-form { padding: 1.6rem 1.4rem; }
 }
 
-/* เมนูด้านข้างบนจอกว้าง */
+/* เมนูด้านข้างบนจอกว้าง: พื้นชมพูไล่สี ตัวอักษรขาว */
 @media (min-width: 1000px) {
-  body:not(.auth) { display: grid; grid-template-columns: 250px minmax(0, 1fr); grid-template-rows: 1fr auto; min-height: 100vh; }
+  body:not(.auth) { display: grid; grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: 1fr auto; min-height: 100vh; }
   body:not(.auth) .topbar {
-    grid-row: 1 / span 2; position: sticky; top: 0; height: 100vh;
-    flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 1rem; padding: 1.2rem .9rem;
-    border-bottom: 0; border-right: 1px solid var(--border);
+    grid-row: 1 / span 2; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 1rem; padding: 1.3rem 1rem;
+    border: 0; color: var(--on-brand);
+    background: linear-gradient(180deg, var(--brand-from), var(--brand-to));
   }
-  body:not(.auth) .brand { flex-wrap: wrap; padding: 0 .4rem; }
-  body:not(.auth) .brand small { flex-basis: 100%; font-size: .8rem; }
-  body:not(.auth) #tabs { flex-direction: column; overflow: visible; }
-  body:not(.auth) #tabs button { text-align: left; padding: .6rem .85rem; border-radius: 10px; }
-  body:not(.auth) #userbox { flex-direction: column; align-items: stretch; gap: .4rem; padding-top: 1rem; border-top: 1px solid var(--border); }
-  body:not(.auth) #userbox span { text-align: left; margin: 0 0 .2rem; }
+  body:not(.auth) .brand { flex-direction: column; align-items: stretch; gap: .6rem; color: var(--on-brand); font-size: 1.3rem; }
+  body:not(.auth) .brand .hosp-logo { justify-content: center; padding: .55rem .7rem; border-radius: 14px; }
+  body:not(.auth) .brand .hosp-logo img { height: 62px; }
+  body:not(.auth) .brand-text { padding: 0 .3rem; }
+  body:not(.auth) .brand small { display: block; margin: 0; font-size: .85rem; color: var(--on-brand-soft); }
+  body:not(.auth) #userbox {
+    order: 1; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .5rem;
+    padding: .7rem .8rem; border-radius: 12px; background: #ffffff24;
+  }
+  body:not(.auth) #userbox span { text-align: left; margin: 0; min-width: 0; }
+  body:not(.auth) #userbox b { color: var(--on-brand); overflow-wrap: anywhere; }
+  body:not(.auth) #userbox small { color: var(--on-brand-soft); }
+  body:not(.auth) #userbox .btn { background: var(--surface); color: var(--primary); border: 0; font-weight: 600; }
+  body:not(.auth) #tabs { order: 2; flex-direction: column; overflow: visible; gap: .2rem; }
+  body:not(.auth) #tabs button { color: var(--on-brand); font-size: 1rem; text-align: left; padding: .65rem .85rem; border-radius: 10px; }
+  body:not(.auth) #tabs button svg { opacity: 1; }
+  body:not(.auth) #tabs button:hover { background: #ffffff26; color: var(--on-brand); }
+  body:not(.auth) #tabs button[aria-current="page"] { background: var(--surface); color: var(--primary); font-weight: 700; box-shadow: 0 4px 14px #0000001f; }
   body:not(.auth) main, body:not(.auth) .site-footer { grid-column: 2; width: 100%; }
 }
 
