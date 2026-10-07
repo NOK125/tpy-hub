@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TPY HR — ระบบงานบุคคล โรงพยาบาลตาพระยา
+"""TPY HR — ระบบงานบริหารทรัพยากรบุคคล โรงพยาบาลตาพระยา
 
 ใช้แค่ Python standard library (http.server + sqlite3) ไม่ต้องติดตั้งไลบรารีเพิ่ม
 รัน:  python server.py --open   แล้วเปิด http://127.0.0.1:8100

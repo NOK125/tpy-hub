@@ -1,5 +1,5 @@
 [Unit]
-Description=TPY HR (ระบบงานบุคคล รพ.ตาพระยา)
+Description=TPY HR (ระบบงานบริหารทรัพยากรบุคคล รพ.ตาพระยา)
 After=network.target
 
 [Service]

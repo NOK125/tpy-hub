@@ -216,7 +216,7 @@ async function dashboardView() {
     `<button class="stat ${attn ? "attn" : ""}" ${tab ? `data-act="go" data-id="${tab}"` : ""}><b>${value}</b><span>${label}</span></button>`;
   const maxLevel = Math.max(1, ...d.by_level.map((r) => r.n));
   view.innerHTML = `
-    <div class="print-only print-head"><h1>Dashboard งานบุคคล โรงพยาบาลตาพระยา</h1>
+    <div class="print-only print-head"><h1>Dashboard งานบริหารทรัพยากรบุคคล โรงพยาบาลตาพระยา</h1>
       <p>ปีงบประมาณ ${d.fiscal_year} · ข้อมูล ณ วันที่ ${when(d.generated_at)}</p></div>
     <div class="toolbar no-print"><h2>Dashboard</h2>
       ${yearSelect(d.years, d.fiscal_year)}
@@ -490,7 +490,7 @@ async function clinicView() {
       <select id="status">${option("", "ทุกสถานะ", status)}${Object.entries(META.clinic_status).map(([k, v]) => option(k, v, status)).join("")}</select>
       ${admin ? "" : `<button class="btn primary" data-act="new">+ ส่งคำถามถึง HR</button>`}
     </div>
-    ${admin ? "" : `<p class="hint">สอบถามเรื่องสิทธิ สวัสดิการ การลา เงินเดือน หรือเรื่องงานบุคคลอื่น ๆ เจ้าหน้าที่ HR จะตอบกลับในหน้านี้ คำถามของคุณเห็นเฉพาะคุณและเจ้าหน้าที่ HR</p>`}
+    ${admin ? "" : `<p class="hint">สอบถามเรื่องสิทธิ สวัสดิการ การลา เงินเดือน หรือเรื่องงานบริหารทรัพยากรบุคคลอื่น ๆ เจ้าหน้าที่ HR จะตอบกลับในหน้านี้ คำถามของคุณเห็นเฉพาะคุณและเจ้าหน้าที่ HR</p>`}
     <section class="list">${table(["หัวข้อ", ...(admin ? ["ผู้ถาม"] : []), "ส่งเมื่อ", "อัปเดตล่าสุด", "สถานะ", ""], list.map((q) => [
       esc(q.subject), ...(admin ? [esc(q.asker)] : []), when(q.created_at), when(q.updated_at), clinicBadge(q.status),
       actions(btn("open", admin && q.status === "open" ? "ตอบ" : "ดู", q.id, admin && q.status === "open" ? "primary" : "")),
@@ -632,13 +632,13 @@ function authCard(title, intro, fields, submitLabel, onSubmit, tip = "") {
   view.innerHTML = `<div class="auth-wrap">
     <aside class="auth-brand">
       <div class="hosp-logo big"><img src="logo.png" alt="โรงพยาบาลตาพระยา"></div>
-      <h1>ระบบงานบุคคล</h1>
-      <p>ระบบงานบุคคล โรงพยาบาลตาพระยา</p>
+      <h1>ระบบงานบริหารทรัพยากรบุคคล</h1>
+      <p>โรงพยาบาลตาพระยา</p>
       <ul>
         ${feature("plans", "แผนพัฒนาบุคลากรและการใช้งบ")}
         ${feature("doc", "คำสั่ง รายงานการประชุม และเอกสาร")}
         ${feature("health", "กิจกรรมตรวจสุขภาพประจำปี")}
-        ${feature("clinic", "HR Clinic ถามตอบกับงานบุคคล")}
+        ${feature("clinic", "HR Clinic ถามตอบกับงานบริหารทรัพยากรบุคคล")}
       </ul>
     </aside>
     <form class="auth-form" id="auth-form">
@@ -678,7 +678,7 @@ function loginScreen() {
     async (d) => {
       me = await api("POST", "/login", d);
       startApp(d.password);
-    }, "เข้าใช้งานครั้งแรก ใช้รหัสผ่านเป็นเลขบัตรประชาชน 5 ตัวท้าย ลืมรหัสผ่านติดต่องานบุคคล");
+    }, "เข้าใช้งานครั้งแรก ใช้รหัสผ่านเป็นเลขบัตรประชาชน 5 ตัวท้าย ลืมรหัสผ่านติดต่องานบริหารทรัพยากรบุคคล");
 }
 
 function setupScreen() {
