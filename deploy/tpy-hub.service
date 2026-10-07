@@ -1,0 +1,17 @@
+[Unit]
+Description=TPY Hub (งานบุคคล วิจัยและนวัตกรรม รพ.ตาพระยา)
+After=network.target
+
+[Service]
+User=tpyhub
+WorkingDirectory=/opt/tpy-hub
+Environment=HOST=127.0.0.1
+Environment=PORT=8100
+Environment=HUB_DB=/var/lib/tpy-hub/hub.db
+Environment=HUB_FILES=/var/lib/tpy-hub/files
+ExecStart=/usr/bin/python3 /opt/tpy-hub/server.py --quiet
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
