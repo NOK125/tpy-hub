@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TPY Hub — ระบบงานบุคคล งานวิจัย และนวัตกรรม โรงพยาบาลตาพระยา
+"""TPY HR — ระบบงานบุคคล โรงพยาบาลตาพระยา
 
 ใช้แค่ Python standard library (http.server + sqlite3) ไม่ต้องติดตั้งไลบรารีเพิ่ม
 รัน:  python server.py --open   แล้วเปิด http://127.0.0.1:8100
@@ -7,6 +7,7 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -15,11 +16,15 @@ import sqlite3
 import sys
 import traceback
 import webbrowser
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -28,32 +33,29 @@ FILES_DIR = Path(os.environ.get("HUB_FILES", DB_PATH.parent / "files"))
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8100"))
 SESSION_HOURS = 12
-COOKIE_NAME = "tpyhub_session"
+COOKIE_NAME = "tpyhr_session"
 MAX_BODY = 1024 * 1024
-MAX_UPLOAD_BODY = 20 * 1024 * 1024   # ไฟล์ PDF ไม่เกิน ~15 MB (base64 ใหญ่ขึ้น 1/3)
-LICENSE_WARN_DAYS = 90
+MAX_UPLOAD_BODY = 21 * 1024 * 1024   # ไฟล์ไม่เกิน 15 MB (base64 ใหญ่ขึ้น 1/3)
+MAX_FILE = 15 * 1024 * 1024
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_MINUTES = 15
+MIN_PASSWORD = 8
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS departments (
-    id INTEGER PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1
-);
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL COLLATE NOCASE,
-    full_name TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('admin', 'head', 'staff')),
-    department_id INTEGER REFERENCES departments(id),
+    national_id TEXT UNIQUE NOT NULL,
+    seq INTEGER,
+    prefix TEXT,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
     position TEXT,
-    profession TEXT,
-    employment_type TEXT,
-    phone TEXT,
-    start_date TEXT,
-    license_no TEXT,
-    license_expiry TEXT,
-    vacation_quota REAL NOT NULL DEFAULT 10,
+    level TEXT,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+    password_hash TEXT NOT NULL,
+    must_change_password INTEGER NOT NULL DEFAULT 1,
+    failed_logins INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -62,65 +64,68 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS leaves (
+CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY,
-    doc_no TEXT UNIQUE NOT NULL,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    department_id INTEGER REFERENCES departments(id),
-    leave_type TEXT NOT NULL,
-    start_date TEXT NOT NULL,
-    end_date TEXT NOT NULL,
-    days REAL NOT NULL,
     fiscal_year INTEGER NOT NULL,
-    reason TEXT,
-    contact TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
+    seq INTEGER NOT NULL,
+    department TEXT NOT NULL,
+    budget REAL NOT NULL DEFAULT 0,
+    spent_initial REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    approver_name TEXT,
-    approved_at TEXT,
-    reject_reason TEXT
+    UNIQUE (fiscal_year, seq)
 );
-CREATE TABLE IF NOT EXISTS works (
+CREATE TABLE IF NOT EXISTS plan_expenses (
     id INTEGER PRIMARY KEY,
-    doc_no TEXT UNIQUE NOT NULL,
-    kind TEXT NOT NULL,
+    plan_id INTEGER NOT NULL REFERENCES plans(id),
+    spent_on TEXT NOT NULL,
+    amount REAL NOT NULL,
+    description TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY,
+    category TEXT NOT NULL,
     title TEXT NOT NULL,
-    authors TEXT NOT NULL,
-    abstract TEXT,
-    keywords TEXT,
-    year INTEGER NOT NULL,
+    doc_no TEXT,
+    doc_date TEXT,
+    note TEXT,
+    file_name TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    uploaded_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clinic_questions (
+    id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    department_id INTEGER REFERENCES departments(id),
-    file_name TEXT,
-    file_key TEXT,
-    status TEXT NOT NULL DEFAULT 'submitted',
-    review_note TEXT,
-    reviewer_name TEXT,
-    reviewed_at TEXT,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_leaves_user ON leaves(user_id, fiscal_year);
-CREATE INDEX IF NOT EXISTS idx_leaves_status ON leaves(status);
-CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);
+CREATE TABLE IF NOT EXISTS clinic_messages (
+    id INTEGER PRIMARY KEY,
+    question_id INTEGER NOT NULL REFERENCES clinic_questions(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    from_admin INTEGER NOT NULL DEFAULT 0,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hr_expenses_plan ON plan_expenses(plan_id);
+CREATE INDEX IF NOT EXISTS idx_hr_docs_cat ON documents(category, doc_date);
+CREATE INDEX IF NOT EXISTS idx_hr_clinic_user ON clinic_questions(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_hr_clinic_msg ON clinic_messages(question_id);
 """
 
-ROLES = {"admin": "ผู้ดูแลระบบ", "head": "หัวหน้างาน", "staff": "เจ้าหน้าที่"}
-
-# วันลาต่อปีงบประมาณ ตามระเบียบการลาของข้าราชการโดยประมาณ ลาพักผ่อนกำหนดรายคนได้ที่ users.vacation_quota
-LEAVE_TYPES = {
-    "sick": ("ลาป่วย", 60),
-    "personal": ("ลากิจส่วนตัว", 45),
-    "vacation": ("ลาพักผ่อน", None),
-    "maternity": ("ลาคลอดบุตร", 90),
-    "ordination": ("ลาอุปสมบท/ฮัจย์", 120),
-    "other": ("ลาอื่น ๆ", None),
+ROLES = {"admin": "ผู้ดูแลระบบ", "user": "ผู้ใช้งาน"}
+DOC_CATEGORIES = {
+    "order": "คำสั่ง",
+    "health": "ตรวจสุขภาพประจำปี",
+    "meeting": "รายงานการประชุม",
+    "other": "เอกสารอื่น ๆ",
 }
-LEAVE_STATUS = {"pending": "รออนุมัติ", "approved": "อนุมัติ", "rejected": "ไม่อนุมัติ", "cancelled": "ยกเลิก"}
-
-WORK_KINDS = {"research": "งานวิจัย", "innovation": "นวัตกรรม", "cqi": "CQI / R2R"}
-# submitted = ส่งแล้วรอพิจารณา, revise = ส่งกลับแก้ไข, approved = อนุมัติ เผยแพร่ในคลังผลงาน, rejected = ไม่อนุมัติ
-WORK_STATUS = {"submitted": "รอพิจารณา", "revise": "ส่งกลับแก้ไข", "approved": "เผยแพร่แล้ว", "rejected": "ไม่อนุมัติ"}
+CLINIC_STATUS = {"open": "รอตอบ", "answered": "ตอบแล้ว", "closed": "ปิดเรื่อง"}
 
 
 class ApiError(Exception):
@@ -143,10 +148,12 @@ class Request:
 
 
 class FileResponse:
-    def __init__(self, path, name, content_type="application/pdf"):
-        self.path = path
+    def __init__(self, name, content_type, data=None, path=None, inline=True):
         self.name = name
         self.content_type = content_type
+        self.data = data
+        self.path = path
+        self.inline = inline
 
 
 def now():
@@ -175,6 +182,16 @@ def init_db():
     conn = connect()
     try:
         conn.execute("PRAGMA journal_mode = WAL")
+        # ฐานข้อมูลรุ่นแรก (ระบบลา/คลังผลงาน) ไม่มีข้อมูลจริง เปลี่ยนชื่อตารางเก็บไว้แล้วเริ่มใหม่
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)")]
+        if "username" in cols:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            for table in ("sessions", "leaves", "works", "users", "departments"):
+                if table in existing:
+                    conn.execute(f"ALTER TABLE {table} RENAME TO legacy_v1_{table}")
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
     finally:
         conn.close()
@@ -197,16 +214,29 @@ def to_str(value, label, required=False, max_len=200):
     return text
 
 
+def parse_number(value):
+    """แปลงตัวเลขจากฟอร์มหรือ Excel (รองรับ 1,234.50) คืน None ถ้าไม่ใช่ตัวเลข"""
+    if value is None:
+        return None
+    text = str(value).replace(",", "").replace("฿", "").strip()
+    if not text:
+        return None
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not number.is_finite():
+        return None
+    return float(number)
+
+
 def to_num(value, label, required=False, minimum=None):
-    if value is None or value == "":
+    if value is None or str(value).strip() == "":
         if required:
             raise ApiError(400, f"กรุณาระบุ{label}")
         return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise ApiError(400, f"{label}ต้องเป็นตัวเลข")
-    if number != number or number in (float("inf"), float("-inf")):
+    number = parse_number(value)
+    if number is None:
         raise ApiError(400, f"{label}ต้องเป็นตัวเลข")
     if minimum is not None and number < minimum:
         raise ApiError(400, f"{label}ต้องไม่น้อยกว่า {minimum:g}")
@@ -217,7 +247,7 @@ def to_id(value, label, required=True):
     number = to_num(value, label, required)
     if number is None:
         return None
-    if not number.is_integer():
+    if not float(number).is_integer():
         raise ApiError(400, f"{label}ไม่ถูกต้อง")
     return int(number)
 
@@ -227,13 +257,9 @@ def to_date(value, label, required=False):
     if text is None:
         return None
     try:
-        return date.fromisoformat(text)
+        return str(date.fromisoformat(text))
     except ValueError:
         raise ApiError(400, f"{label}ไม่ถูกต้อง")
-
-
-def iso(d):
-    return str(d) if d else None
 
 
 def to_choice(value, label, choices):
@@ -246,13 +272,214 @@ def to_bool(value):
     return value in (True, 1, "1", "true", "on")
 
 
-def next_doc_no(conn, table, prefix):
-    year = datetime.now().year + 543
-    head = f"{prefix}{year}-"
-    last = conn.execute(f"SELECT doc_no FROM {table} WHERE doc_no LIKE ? ORDER BY doc_no DESC LIMIT 1",
-                        (head + "%",)).fetchone()
-    seq = int(last[0].split("-")[1]) + 1 if last else 1
-    return f"{head}{seq:04d}"
+def clean_national_id(value):
+    """คืนเลขบัตร 13 หลัก รองรับค่าจาก Excel ที่เป็นตัวเลข (1.23E+12) หรือมีขีดคั่น"""
+    text = "" if value is None else str(value).strip()
+    if re.fullmatch(r"[\d\s-]+", text):
+        digits = re.sub(r"\D", "", text)
+    else:
+        number = parse_number(text)
+        digits = str(int(number)) if number is not None and float(number).is_integer() else ""
+    return digits if len(digits) == 13 else None
+
+
+def national_id_checksum_ok(nid):
+    total = sum(int(nid[i]) * (13 - i) for i in range(12))
+    return (11 - total % 11) % 10 == int(nid[12])
+
+
+def to_national_id(value):
+    nid = clean_national_id(value)
+    if nid is None:
+        raise ApiError(400, "เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก")
+    return nid
+
+
+# ---------- ไฟล์ Excel (.xlsx) อ่านและเขียนด้วย zipfile + XML ----------
+
+XL_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def decode_upload(value, label="ไฟล์"):
+    try:
+        data = base64.b64decode(value or "", validate=True)
+    except (ValueError, TypeError):
+        raise ApiError(400, f"{label}ไม่ถูกต้อง")
+    if not data:
+        raise ApiError(400, f"กรุณาเลือก{label}")
+    if len(data) > MAX_FILE:
+        raise ApiError(400, f"{label}ต้องไม่เกิน 15 MB")
+    return data
+
+
+def col_index(ref):
+    letters = re.match(r"[A-Z]+", ref or "")
+    if not letters:
+        return None
+    n = 0
+    for ch in letters.group():
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def col_letter(i):
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def read_xlsx(data):
+    """อ่านชีตแรกของไฟล์ .xlsx คืนเป็นรายการแถว (list ของข้อความ)"""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        if sum(i.file_size for i in zf.infolist()) > 100 * 1024 * 1024:
+            raise ApiError(400, "ไฟล์ Excel ใหญ่เกินไป")
+
+        def xml(name):
+            return ET.fromstring(zf.read(name))
+
+        shared = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            for si in xml("xl/sharedStrings.xml").findall(f"{XL_NS}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{XL_NS}t")))
+        sheet = xml("xl/workbook.xml").find(f"{XL_NS}sheets/{XL_NS}sheet")
+        rid = sheet.get(f"{REL_NS}id")
+        target = next(r.get("Target") for r in xml("xl/_rels/workbook.xml.rels") if r.get("Id") == rid)
+        path = target.lstrip("/") if target.startswith("/") else "xl/" + target
+        result = []
+        for row in xml(path).iter(f"{XL_NS}row"):
+            values, pos = {}, 0
+            for c in row.findall(f"{XL_NS}c"):
+                idx = col_index(c.get("r"))
+                pos = pos if idx is None else idx
+                kind = c.get("t")
+                v = c.find(f"{XL_NS}v")
+                if kind == "s" and v is not None:
+                    text = shared[int(v.text)]
+                elif kind == "inlineStr":
+                    text = "".join(t.text or "" for t in c.iter(f"{XL_NS}t"))
+                else:
+                    text = v.text if v is not None and v.text else ""
+                values[pos] = text.strip()
+                pos += 1
+            if values:
+                result.append([values.get(i, "") for i in range(max(values) + 1)])
+            else:
+                result.append([])
+        return result
+    except ApiError:
+        raise
+    except (zipfile.BadZipFile, KeyError, StopIteration, ET.ParseError, IndexError, ValueError):
+        raise ApiError(400, "อ่านไฟล์ไม่ได้ กรุณาใช้ไฟล์ Excel นามสกุล .xlsx")
+
+
+def map_columns(rows_, rules, must_have):
+    """หาแถวหัวตาราง แล้วจับคู่คอลัมน์ตามคำในหัวตาราง rules = [(key, [คำที่ต้องมี], [คำที่ต้องไม่มี])]"""
+    for r_index, row in enumerate(rows_[:15]):
+        mapping = {}
+        for c_index, header in enumerate(row):
+            h = re.sub(r"\s+", "", header)
+            for key, words, avoid in rules:
+                if key not in mapping and any(w in h for w in words) and not any(a in h for a in avoid):
+                    mapping[key] = c_index
+                    break
+        if all(k in mapping for k in must_have):
+            return r_index, mapping
+    raise ApiError(400, "ไม่พบหัวตารางในไฟล์ กรุณาใช้แบบฟอร์มจากปุ่ม \"ดาวน์โหลดแบบฟอร์ม\"")
+
+
+INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sheet_name(name):
+    return re.sub(r"[\[\]:*?/\\]", " ", name)[:31]
+
+
+def xlsx_bytes(sheets):
+    """สร้างไฟล์ .xlsx จาก [(ชื่อชีต, [แถว])] แถวแรกเป็นหัวตาราง"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        overrides = "".join(
+            f'<Override PartName="/xl/worksheets/sheet{i + 1}.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            for i in range(len(sheets)))
+        zf.writestr("[Content_Types].xml",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                    '<Default Extension="xml" ContentType="application/xml"/>'
+                    '<Override PartName="/xl/workbook.xml" '
+                    'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                    '<Override PartName="/xl/styles.xml" '
+                    'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                    f"{overrides}</Types>")
+        zf.writestr("_rels/.rels",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+                    'Target="xl/workbook.xml"/></Relationships>')
+        sheet_tags = "".join(
+            f'<sheet name="{xml_escape(sheet_name(name))}" sheetId="{i + 1}" r:id="rId{i + 1}"/>'
+            for i, (name, _) in enumerate(sheets))
+        zf.writestr("xl/workbook.xml",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                    f"<sheets>{sheet_tags}</sheets></workbook>")
+        rels = "".join(
+            f'<Relationship Id="rId{i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            f'Target="worksheets/sheet{i + 1}.xml"/>' for i in range(len(sheets)))
+        rels += (f'<Relationship Id="rId{len(sheets) + 1}" '
+                 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>')
+        zf.writestr("xl/_rels/workbook.xml.rels",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>')
+        # style 1 = ตัวหนาสำหรับหัวตาราง, style 2 = ตัวเลขมีจุลภาค
+        zf.writestr("xl/styles.xml",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    '<fonts count="2"><font><sz val="11"/><name val="Tahoma"/></font>'
+                    '<font><b/><sz val="11"/><name val="Tahoma"/></font></fonts>'
+                    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+                    '<borders count="1"><border/></borders>'
+                    '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+                    '<cellXfs count="3"><xf/><xf fontId="1" applyFont="1"/><xf numFmtId="4" applyNumberFormat="1"/></cellXfs>'
+                    '</styleSheet>')
+        for i, (_, data_rows) in enumerate(sheets):
+            widths = {}
+            out = []
+            for r, row in enumerate(data_rows):
+                cells = []
+                for c, value in enumerate(row):
+                    ref = f"{col_letter(c)}{r + 1}"
+                    widths[c] = max(widths.get(c, 8), min(60, len(str(value if value is not None else "")) + 2))
+                    if value is None or value == "":
+                        continue
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and r > 0:
+                        cells.append(f'<c r="{ref}" s="2"><v>{value}</v></c>')
+                    else:
+                        text = xml_escape(INVALID_XML.sub("", str(value)))
+                        style = ' s="1"' if r == 0 else ""
+                        cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{text}</t></is></c>')
+                out.append(f'<row r="{r + 1}">{"".join(cells)}</row>')
+            cols = "".join(f'<col min="{c + 1}" max="{c + 1}" width="{w * 1.2:.0f}" customWidth="1"/>'
+                           for c, w in sorted(widths.items()))
+            zf.writestr(f"xl/worksheets/sheet{i + 1}.xml",
+                        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                        f'{"<cols>" + cols + "</cols>" if cols else ""}<sheetData>{"".join(out)}</sheetData></worksheet>')
+    return buf.getvalue()
+
+
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def xlsx_response(name, sheets):
+    return FileResponse(name, XLSX_TYPE, data=xlsx_bytes(sheets), inline=False)
 
 
 # ---------- บัญชีผู้ใช้และการล็อกอิน ----------
@@ -272,10 +499,20 @@ def check_password(password, stored):
         return False
 
 
-def valid_password(password):
+DUMMY_HASH = hash_password(secrets.token_hex(8))
+
+
+def initial_password(nid):
+    """รหัสผ่านครั้งแรก = เลขบัตร 5 ตัวท้าย"""
+    return nid[-5:]
+
+
+def valid_new_password(password, nid):
     password = "" if password is None else str(password)
-    if len(password) < 6:
-        raise ApiError(400, "รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร")
+    if len(password) < MIN_PASSWORD:
+        raise ApiError(400, f"รหัสผ่านใหม่ต้องยาวอย่างน้อย {MIN_PASSWORD} ตัวอักษร")
+    if nid and password in (nid, nid[-5:]):
+        raise ApiError(400, "รหัสผ่านใหม่ต้องไม่ใช่เลขบัตรประชาชน")
     return password
 
 
@@ -283,18 +520,19 @@ def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def full_name(row):
+    return f"{row['prefix'] or ''}{row['first_name']} {row['last_name']}".strip()
+
+
 def public_user(row):
     if row is None:
         return None
     user = dict(row)
-    user.pop("password_hash", None)
+    for key in ("password_hash", "failed_logins"):
+        user.pop(key, None)
+    user["full_name"] = full_name(row)
+    user["locked"] = bool(row["locked_until"] and row["locked_until"] > now())
     return user
-
-
-USER_SELECT = """
-    SELECT u.*, d.name AS department_name
-    FROM users u LEFT JOIN departments d ON d.id = u.department_id
-"""
 
 
 def user_from_cookie(conn, header):
@@ -308,7 +546,8 @@ def user_from_cookie(conn, header):
     if COOKIE_NAME not in cookie:
         return None
     row = conn.execute(
-        USER_SELECT + " JOIN sessions s ON s.user_id = u.id WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
+        "SELECT u.* FROM users u JOIN sessions s ON s.user_id = u.id"
+        " WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
         (token_hash(cookie[COOKIE_NAME].value), now())).fetchone()
     return public_user(row)
 
@@ -323,7 +562,7 @@ def start_session(req, user_id):
 
 
 def get_user(conn, user_id):
-    row = conn.execute(USER_SELECT + " WHERE u.id = ?", (user_id,)).fetchone()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None:
         raise ApiError(404, "ไม่พบผู้ใช้นี้")
     return public_user(row)
@@ -339,24 +578,38 @@ def setup(req):
     if not setup_status(req)["needs_setup"]:
         raise ApiError(409, "ระบบตั้งค่าไปแล้ว")
     b = req.body
-    username = to_str(b.get("username"), "ชื่อผู้ใช้", True, 50)
-    full_name = to_str(b.get("full_name"), "ชื่อ-นามสกุล", True)
-    password = valid_password(b.get("password"))
+    nid = to_national_id(b.get("national_id"))
     user_id = req.conn.execute(
-        "INSERT INTO users (username, full_name, password_hash, role, created_at) VALUES (?, ?, ?, 'admin', ?)",
-        (username, full_name, hash_password(password), now())).lastrowid
+        """INSERT INTO users (national_id, prefix, first_name, last_name, position, role, password_hash,
+               must_change_password, created_at) VALUES (?, ?, ?, ?, ?, 'admin', ?, 0, ?)""",
+        (nid, to_str(b.get("prefix"), "คำนำหน้า", max_len=30), to_str(b.get("first_name"), "ชื่อ", True, 100),
+         to_str(b.get("last_name"), "นามสกุล", True, 100), to_str(b.get("position"), "ตำแหน่ง", max_len=100),
+         hash_password(valid_new_password(b.get("password"), nid)), now())).lastrowid
     start_session(req, user_id)
     return get_user(req.conn, user_id)
 
 
 def login(req):
-    username = to_str(req.body.get("username"), "ชื่อผู้ใช้", True, 50)
+    nid = clean_national_id(req.body.get("national_id"))
     password = str(req.body.get("password") or "")
-    row = req.conn.execute(USER_SELECT + " WHERE u.username = ?", (username,)).fetchone()
-    if row is None or not check_password(password, row["password_hash"]):
-        raise ApiError(401, "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+    row = req.conn.execute("SELECT * FROM users WHERE national_id = ?", (nid,)).fetchone() if nid else None
+    if row is None:
+        check_password(password, DUMMY_HASH)   # ให้ใช้เวลาเท่ากัน ไม่บอกว่ามีเลขบัตรนี้หรือไม่
+        raise ApiError(401, "เลขบัตรประชาชนหรือรหัสผ่านไม่ถูกต้อง")
+    if row["locked_until"] and row["locked_until"] > now():
+        raise ApiError(429, f"ใส่รหัสผ่านผิดหลายครั้ง กรุณารอ {LOGIN_LOCK_MINUTES} นาทีแล้วลองใหม่")
+    if not check_password(password, row["password_hash"]):
+        fails = row["failed_logins"] + 1
+        locked = None
+        if fails >= LOGIN_MAX_FAILS:
+            fails = 0
+            locked = (datetime.now() + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat(timespec="seconds")
+        req.conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?", (fails, locked, row["id"]))
+        req.conn.commit()   # บันทึกจำนวนครั้งที่ผิดก่อนส่ง error (error จะ rollback)
+        raise ApiError(401, "เลขบัตรประชาชนหรือรหัสผ่านไม่ถูกต้อง")
     if not row["active"]:
         raise ApiError(403, "บัญชีนี้ถูกปิดใช้งาน ติดต่อผู้ดูแลระบบ")
+    req.conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (row["id"],))
     start_session(req, row["id"])
     return public_user(row)
 
@@ -375,482 +628,599 @@ def change_password(req):
     row = req.conn.execute("SELECT password_hash FROM users WHERE id = ?", (req.user["id"],)).fetchone()
     if not check_password(str(req.body.get("old_password") or ""), row["password_hash"]):
         raise ApiError(400, "รหัสผ่านเดิมไม่ถูกต้อง")
-    password = valid_password(req.body.get("new_password"))
-    req.conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), req.user["id"]))
-    return {"ok": True}
-
-
-def update_me(req):
-    """เจ้าหน้าที่แก้ข้อมูลติดต่อของตัวเองได้ ส่วนข้อมูลตำแหน่งและใบอนุญาตให้ผู้ดูแลแก้"""
-    phone = to_str(req.body.get("phone"), "เบอร์โทร", max_len=30)
-    req.conn.execute("UPDATE users SET phone = ? WHERE id = ?", (phone, req.user["id"]))
+    password = valid_new_password(req.body.get("new_password"), req.user["national_id"])
+    req.conn.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+                     (hash_password(password), req.user["id"]))
     return get_user(req.conn, req.user["id"])
 
 
 def meta(req):
     return {
         "roles": ROLES,
-        "leave_types": {k: v[0] for k, v in LEAVE_TYPES.items()},
-        "leave_status": LEAVE_STATUS,
-        "work_kinds": WORK_KINDS,
-        "work_status": WORK_STATUS,
+        "doc_categories": DOC_CATEGORIES,
+        "clinic_status": CLINIC_STATUS,
         "fiscal_year": fiscal_year(today()),
+        "min_password": MIN_PASSWORD,
     }
 
 
-# ---------- หน่วยงาน ----------
-
-def list_departments(req):
-    where = "" if req.user["role"] == "admin" else "WHERE active = 1"
-    return rows(req.conn.execute(f"SELECT * FROM departments {where} ORDER BY name"))
-
-
-def save_department(req, dept_id=None):
-    name = to_str(req.body.get("name"), "ชื่อหน่วยงาน", True, 100)
-    active = 1 if to_bool(req.body.get("active", True)) else 0
-    try:
-        if dept_id is None:
-            dept_id = req.conn.execute("INSERT INTO departments (name, active) VALUES (?, ?)", (name, active)).lastrowid
-        else:
-            if req.conn.execute("UPDATE departments SET name = ?, active = ? WHERE id = ?",
-                                (name, active, dept_id)).rowcount == 0:
-                raise ApiError(404, "ไม่พบหน่วยงานนี้")
-    except sqlite3.IntegrityError:
-        raise ApiError(409, "มีหน่วยงานชื่อนี้แล้ว")
-    return dict(req.conn.execute("SELECT * FROM departments WHERE id = ?", (dept_id,)).fetchone())
-
-
-def create_department(req):
-    return save_department(req)
-
-
-def update_department(req, dept_id):
-    return save_department(req, dept_id)
-
-
-# ---------- บุคลากร ----------
-
-PROFILE_FIELDS = [
-    ("position", "ตำแหน่ง", 100),
-    ("profession", "วิชาชีพ", 100),
-    ("employment_type", "ประเภทการจ้าง", 50),
-    ("phone", "เบอร์โทร", 30),
-    ("license_no", "เลขที่ใบประกอบวิชาชีพ", 50),
-]
-
-
-def staff_scope(req):
-    """หัวหน้างานเห็นเฉพาะคนในหน่วยงานตัวเอง ผู้ดูแลเห็นทั้งหมด"""
-    if req.user["role"] == "admin":
-        return "", []
-    return " AND u.department_id = ?", [req.user["department_id"]]
-
+# ---------- จัดการผู้ใช้ (ผู้ดูแลระบบ) ----------
 
 def list_users(req):
-    where, params = staff_scope(req)
+    where, params = ["1 = 1"], []
     search = req.q("q").strip()
     if search:
-        where += " AND (u.full_name LIKE ? OR u.username LIKE ? OR u.position LIKE ?)"
-        params += [f"%{search}%"] * 3
+        where.append("(first_name LIKE ? OR last_name LIKE ? OR national_id LIKE ? OR position LIKE ? OR level LIKE ?)")
+        params += [f"%{search}%"] * 5
     if req.q("active") != "all":
-        where += " AND u.active = 1"
+        where.append("active = 1")
     return [public_user(r) for r in req.conn.execute(
-        USER_SELECT + f" WHERE 1 = 1 {where} ORDER BY d.name, u.full_name", params)]
+        f"SELECT * FROM users WHERE {' AND '.join(where)} ORDER BY seq IS NULL, seq, first_name", params)]
 
 
-def user_values(req, creating):
-    b = req.body
-    values = {
-        "full_name": to_str(b.get("full_name"), "ชื่อ-นามสกุล", True),
-        "role": to_choice(b.get("role"), "สิทธิ์", ROLES),
-        "department_id": to_id(b.get("department_id"), "หน่วยงาน", False),
-        "start_date": iso(to_date(b.get("start_date"), "วันที่เริ่มงาน")),
-        "license_expiry": iso(to_date(b.get("license_expiry"), "วันหมดอายุใบประกอบวิชาชีพ")),
-        "vacation_quota": to_num(b.get("vacation_quota", 10), "วันลาพักผ่อนต่อปี", True, 0),
+def user_values(b):
+    return {
+        "seq": to_id(b.get("seq"), "ลำดับ", False),
+        "prefix": to_str(b.get("prefix"), "คำนำหน้า", max_len=30),
+        "first_name": to_str(b.get("first_name"), "ชื่อ", True, 100),
+        "last_name": to_str(b.get("last_name"), "นามสกุล", True, 100),
+        "position": to_str(b.get("position"), "ตำแหน่ง", max_len=150),
+        "level": to_str(b.get("level"), "ระดับ", max_len=100),
+        "role": to_choice(b.get("role", "user"), "สิทธิ์", ROLES),
         "active": 1 if to_bool(b.get("active", True)) else 0,
     }
-    for key, label, max_len in PROFILE_FIELDS:
-        values[key] = to_str(b.get(key), label, max_len=max_len)
-    if values["role"] != "admin" and not values["department_id"]:
-        raise ApiError(400, "กรุณาเลือกหน่วยงาน")
-    if values["department_id"] and not req.conn.execute(
-            "SELECT 1 FROM departments WHERE id = ?", (values["department_id"],)).fetchone():
-        raise ApiError(400, "ไม่พบหน่วยงานนี้")
-    if creating or b.get("password"):
-        values["password_hash"] = hash_password(valid_password(b.get("password")))
-    return values
 
 
 def create_user(req):
-    values = user_values(req, True)
-    values["username"] = to_str(req.body.get("username"), "ชื่อผู้ใช้", True, 50)
-    values["created_at"] = now()
-    cols = ", ".join(values)
+    values = user_values(req.body)
+    nid = to_national_id(req.body.get("national_id"))
+    values.update(national_id=nid, password_hash=hash_password(initial_password(nid)),
+                  must_change_password=1, created_at=now())
     try:
-        user_id = req.conn.execute(f"INSERT INTO users ({cols}) VALUES ({', '.join('?' * len(values))})",
-                                   list(values.values())).lastrowid
+        user_id = req.conn.execute(
+            f"INSERT INTO users ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+            list(values.values())).lastrowid
     except sqlite3.IntegrityError:
-        raise ApiError(409, "มีชื่อผู้ใช้นี้แล้ว")
+        raise ApiError(409, "มีเลขบัตรประชาชนนี้ในระบบแล้ว")
     return get_user(req.conn, user_id)
 
 
 def update_user(req, user_id):
     get_user(req.conn, user_id)
-    values = user_values(req, False)
+    values = user_values(req.body)
+    values["national_id"] = to_national_id(req.body.get("national_id"))
     if user_id == req.user["id"] and (values["role"] != "admin" or not values["active"]):
         raise ApiError(400, "ไม่สามารถลดสิทธิ์หรือปิดบัญชีของตัวเองได้")
-    sets = ", ".join(f"{k} = ?" for k in values)
-    req.conn.execute(f"UPDATE users SET {sets} WHERE id = ?", [*values.values(), user_id])
-    if not values["active"] or "password_hash" in values:
+    try:
+        req.conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                         [*values.values(), user_id])
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "มีเลขบัตรประชาชนนี้ในระบบแล้ว")
+    if not values["active"]:
         req.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
     return get_user(req.conn, user_id)
 
 
-def license_alerts(req):
-    where, params = staff_scope(req)
-    limit = str(today() + timedelta(days=LICENSE_WARN_DAYS))
-    return [public_user(r) for r in req.conn.execute(
-        USER_SELECT + f" WHERE u.active = 1 AND u.license_expiry IS NOT NULL AND u.license_expiry <= ? {where}"
-        " ORDER BY u.license_expiry", [limit, *params])]
-
-
-# ---------- การลา ----------
-
-def count_workdays(start, end):
-    """นับวันจันทร์-ศุกร์ (ยังไม่หักวันหยุดนักขัตฤกษ์)"""
-    days, d = 0, start
-    while d <= end:
-        if d.weekday() < 5:
-            days += 1
-        d += timedelta(days=1)
-    return days
-
-
-def leave_quota(user, leave_type):
-    if leave_type == "vacation":
-        return user["vacation_quota"]
-    return LEAVE_TYPES[leave_type][1]
-
-
-def leave_balance_for(conn, user, year):
-    used = {r["leave_type"]: r for r in conn.execute(
-        """SELECT leave_type,
-                  SUM(CASE WHEN status = 'approved' THEN days ELSE 0 END) AS used,
-                  SUM(CASE WHEN status = 'pending' THEN days ELSE 0 END) AS pending
-           FROM leaves WHERE user_id = ? AND fiscal_year = ? GROUP BY leave_type""",
-        (user["id"], year))}
-    result = []
-    for key, (label, _) in LEAVE_TYPES.items():
-        quota = leave_quota(user, key)
-        row = used.get(key)
-        result.append({
-            "leave_type": key, "label": label, "quota": quota,
-            "used": row["used"] if row else 0, "pending": row["pending"] if row else 0,
-        })
-    return result
-
-
-def leave_balance(req):
-    year = to_id(req.q("year") or fiscal_year(today()), "ปีงบประมาณ")
-    user = req.user
-    if req.q("user_id"):
-        user = get_user(req.conn, to_id(req.q("user_id"), "ผู้ใช้"))
-        check_staff_access(req, user)
-    return {"fiscal_year": year, "user": user, "balance": leave_balance_for(req.conn, user, year)}
-
-
-def check_staff_access(req, user):
-    if req.user["role"] == "admin" or user["id"] == req.user["id"]:
-        return
-    if req.user["role"] == "head" and user["department_id"] == req.user["department_id"]:
-        return
-    raise ApiError(403, "ไม่มีสิทธิ์ดูข้อมูลนี้")
-
-
-LEAVE_SELECT = """
-    SELECT l.*, u.full_name, u.position, d.name AS department_name
-    FROM leaves l JOIN users u ON u.id = l.user_id LEFT JOIN departments d ON d.id = l.department_id
-"""
-
-
-def get_leave(req, leave_id):
-    row = req.conn.execute(LEAVE_SELECT + " WHERE l.id = ?", (leave_id,)).fetchone()
-    if row is None:
-        raise ApiError(404, "ไม่พบใบลานี้")
-    leave = dict(row)
-    if req.user["role"] == "staff" and leave["user_id"] != req.user["id"]:
-        raise ApiError(404, "ไม่พบใบลานี้")
-    if req.user["role"] == "head" and leave["user_id"] != req.user["id"] \
-            and leave["department_id"] != req.user["department_id"]:
-        raise ApiError(404, "ไม่พบใบลานี้")
-    return leave
-
-
-def list_leaves(req):
-    where, params = ["1 = 1"], []
-    scope = req.q("scope", "mine")
-    if scope == "mine" or req.user["role"] == "staff":
-        where.append("l.user_id = ?")
-        params.append(req.user["id"])
-    elif req.user["role"] == "head":
-        where.append("l.department_id = ?")
-        params.append(req.user["department_id"])
-    if req.q("status"):
-        where.append("l.status = ?")
-        params.append(req.q("status"))
-    if req.q("year"):
-        where.append("l.fiscal_year = ?")
-        params.append(to_id(req.q("year"), "ปีงบประมาณ"))
-    return rows(req.conn.execute(
-        LEAVE_SELECT + f" WHERE {' AND '.join(where)} ORDER BY l.created_at DESC LIMIT 500", params))
-
-
-def create_leave(req):
-    b = req.body
-    user = req.user
-    leave_type = to_choice(b.get("leave_type"), "ประเภทการลา", LEAVE_TYPES)
-    start = to_date(b.get("start_date"), "วันที่เริ่มลา", True)
-    end = to_date(b.get("end_date"), "วันที่สิ้นสุด", True)
-    if end < start:
-        raise ApiError(400, "วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่มลา")
-    if (end - start).days > 365:
-        raise ApiError(400, "ช่วงวันลายาวเกินไป")
-    if fiscal_year(start) != fiscal_year(end):
-        raise ApiError(400, "ช่วงวันลาข้ามปีงบประมาณ กรุณาแยกเป็น 2 ใบ")
-    half = to_bool(b.get("half_day"))
-    if half and start != end:
-        raise ApiError(400, "ลาครึ่งวันได้เฉพาะเมื่อลาวันเดียว")
-    days = count_workdays(start, end)
-    if days == 0:
-        raise ApiError(400, "ช่วงวันที่เลือกเป็นวันเสาร์-อาทิตย์ทั้งหมด")
-    if half:
-        days = 0.5
-    overlap = req.conn.execute(
-        "SELECT doc_no FROM leaves WHERE user_id = ? AND status IN ('pending', 'approved')"
-        " AND start_date <= ? AND end_date >= ?", (user["id"], str(end), str(start))).fetchone()
-    if overlap:
-        raise ApiError(409, f"ช่วงวันลาซ้ำกับใบลา {overlap[0]}")
-    year = fiscal_year(start)
-    quota = leave_quota(user, leave_type)
-    if quota is not None:
-        bal = next(x for x in leave_balance_for(req.conn, user, year) if x["leave_type"] == leave_type)
-        remaining = quota - bal["used"] - bal["pending"]
-        if days > remaining:
-            raise ApiError(400, f"{LEAVE_TYPES[leave_type][0]}คงเหลือ {remaining:g} วัน ไม่พอสำหรับ {days:g} วัน")
-    leave_id = req.conn.execute(
-        """INSERT INTO leaves (doc_no, user_id, department_id, leave_type, start_date, end_date, days,
-               fiscal_year, reason, contact, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-        (next_doc_no(req.conn, "leaves", "LV"), user["id"], user["department_id"], leave_type, str(start), str(end),
-         days, year, to_str(b.get("reason"), "เหตุผลการลา", max_len=500),
-         to_str(b.get("contact"), "ที่ติดต่อระหว่างลา", max_len=200), now())).lastrowid
-    return get_leave(req, leave_id)
-
-
-def cancel_leave(req, leave_id):
-    leave = get_leave(req, leave_id)
-    if leave["user_id"] != req.user["id"] and req.user["role"] != "admin":
-        raise ApiError(403, "ยกเลิกได้เฉพาะใบลาของตัวเอง")
-    if leave["status"] != "pending":
-        raise ApiError(409, "ยกเลิกได้เฉพาะใบลาที่ยังรออนุมัติ")
-    req.conn.execute("UPDATE leaves SET status = 'cancelled' WHERE id = ?", (leave_id,))
-    return get_leave(req, leave_id)
-
-
-def check_can_approve(req, leave):
-    if leave["status"] != "pending":
-        raise ApiError(409, "ใบลานี้ไม่ได้อยู่ในสถานะรออนุมัติ")
-    if leave["user_id"] == req.user["id"] and req.user["role"] != "admin":
-        raise ApiError(403, "อนุมัติใบลาของตัวเองไม่ได้")
-    if req.user["role"] == "head" and leave["department_id"] != req.user["department_id"]:
-        raise ApiError(403, "อนุมัติได้เฉพาะใบลาในหน่วยงานของตัวเอง")
-
-
-def approve_leave(req, leave_id):
-    leave = get_leave(req, leave_id)
-    check_can_approve(req, leave)
-    req.conn.execute("UPDATE leaves SET status = 'approved', approver_name = ?, approved_at = ? WHERE id = ?",
-                     (req.user["full_name"], now(), leave_id))
-    return get_leave(req, leave_id)
-
-
-def reject_leave(req, leave_id):
-    leave = get_leave(req, leave_id)
-    check_can_approve(req, leave)
-    reason = to_str(req.body.get("reject_reason"), "เหตุผลที่ไม่อนุมัติ", True, 500)
+def reset_password(req, user_id):
+    user = get_user(req.conn, user_id)
     req.conn.execute(
-        "UPDATE leaves SET status = 'rejected', approver_name = ?, approved_at = ?, reject_reason = ? WHERE id = ?",
-        (req.user["full_name"], now(), reason, leave_id))
-    return get_leave(req, leave_id)
+        "UPDATE users SET password_hash = ?, must_change_password = 1, failed_logins = 0, locked_until = NULL WHERE id = ?",
+        (hash_password(initial_password(user["national_id"])), user_id))
+    req.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    return get_user(req.conn, user_id)
 
 
-# ---------- งานวิจัยและนวัตกรรม ----------
+USER_COLUMNS = [
+    ("seq", ["ลำดับ", "ที่"], []),
+    ("prefix", ["คำนำหน้า"], []),
+    ("last_name", ["นามสกุล", "สกุล"], []),
+    ("national_id", ["บัตร", "เลขประจำตัว"], []),
+    ("first_name", ["ชื่อ"], ["นามสกุล", "คำนำหน้า"]),
+    ("position", ["ตำแหน่ง"], []),
+    ("level", ["ระดับ"], []),
+]
 
-WORK_SELECT = """
-    SELECT w.*, u.full_name AS owner_name, d.name AS department_name
-    FROM works w JOIN users u ON u.id = w.user_id LEFT JOIN departments d ON d.id = w.department_id
+
+def import_users(req):
+    data = decode_upload(req.body.get("file_data"), "ไฟล์ Excel")
+    sheet = read_xlsx(data)
+    header_row, cols = map_columns(sheet, USER_COLUMNS, ["first_name", "last_name", "national_id"])
+    created = updated = 0
+    errors, warnings = [], []
+    seen = set()
+    for i, row in enumerate(sheet[header_row + 1:], start=header_row + 2):
+        cell = lambda key: (row[cols[key]] if key in cols and cols[key] < len(row) else "").strip()
+        if not any(x.strip() for x in row):
+            continue
+        nid = clean_national_id(cell("national_id"))
+        first, last = cell("first_name"), cell("last_name")
+        if not nid:
+            errors.append(f"แถว {i}: เลขบัตรประชาชนไม่ครบ 13 หลัก ({cell('national_id') or 'ว่าง'})")
+            continue
+        if not first or not last:
+            errors.append(f"แถว {i}: ไม่มีชื่อหรือนามสกุล")
+            continue
+        if nid in seen:
+            errors.append(f"แถว {i}: เลขบัตร {nid} ซ้ำกับแถวก่อนหน้าในไฟล์")
+            continue
+        seen.add(nid)
+        if not national_id_checksum_ok(nid):
+            warnings.append(f"แถว {i}: เลขบัตร {nid} ({first} {last}) หลักตรวจสอบไม่ตรง อาจพิมพ์ผิด กรุณาตรวจสอบ")
+        seq = parse_number(cell("seq"))
+        values = {
+            "seq": int(seq) if seq is not None and float(seq).is_integer() else None,
+            "prefix": cell("prefix")[:30] or None,
+            "first_name": first[:100],
+            "last_name": last[:100],
+            "position": cell("position")[:150] or None,
+            "level": cell("level")[:100] or None,
+        }
+        existing = req.conn.execute("SELECT id FROM users WHERE national_id = ?", (nid,)).fetchone()
+        if existing:
+            req.conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                             [*values.values(), existing["id"]])
+            updated += 1
+        else:
+            values.update(national_id=nid, password_hash=hash_password(initial_password(nid)),
+                          must_change_password=1, role="user", created_at=now())
+            req.conn.execute(f"INSERT INTO users ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+                             list(values.values()))
+            created += 1
+    return {"created": created, "updated": updated, "errors": errors, "warnings": warnings}
+
+
+def users_template(req):
+    return xlsx_response("แบบฟอร์มนำเข้าผู้ใช้.xlsx",
+                         [("ผู้ใช้", [["ลำดับ", "คำนำหน้า", "ชื่อ", "นามสกุล", "หมายเลขบัตร", "ตำแหน่ง", "ระดับ"]])])
+
+
+# ---------- แผนพัฒนาบุคลากร ----------
+
+PLAN_SELECT = """
+    SELECT p.*, p.spent_initial + COALESCE((SELECT SUM(amount) FROM plan_expenses e WHERE e.plan_id = p.id), 0) AS spent,
+           (SELECT COUNT(*) FROM plan_expenses e WHERE e.plan_id = p.id) AS expense_count
+    FROM plans p
 """
 
 
-def get_work(req, work_id):
-    row = req.conn.execute(WORK_SELECT + " WHERE w.id = ?", (work_id,)).fetchone()
+def plan_years(conn):
+    years = {r[0] for r in conn.execute("SELECT DISTINCT fiscal_year FROM plans")}
+    years.add(fiscal_year(today()))
+    return sorted(years, reverse=True)
+
+
+def year_param(req):
+    return to_id(req.q("year") or fiscal_year(today()), "ปีงบประมาณ")
+
+
+def list_plans(req):
+    year = year_param(req)
+    plans = rows(req.conn.execute(PLAN_SELECT + " WHERE p.fiscal_year = ? ORDER BY p.seq", (year,)))
+    for p in plans:
+        p["remaining"] = p["budget"] - p["spent"]
+    total = sum(p["budget"] for p in plans)
+    spent = sum(p["spent"] for p in plans)
+    return {"fiscal_year": year, "years": plan_years(req.conn), "plans": plans,
+            "total_budget": total, "total_spent": spent, "total_remaining": total - spent}
+
+
+def get_plan(conn, plan_id):
+    row = conn.execute(PLAN_SELECT + " WHERE p.id = ?", (plan_id,)).fetchone()
     if row is None:
-        raise ApiError(404, "ไม่พบผลงานนี้")
-    work = dict(row)
-    # ผลงานที่เผยแพร่แล้วทุกคนดูได้ ที่ยังไม่เผยแพร่ดูได้เฉพาะเจ้าของและผู้ดูแลระบบ
-    if work["status"] != "approved" and req.user["role"] != "admin" and work["user_id"] != req.user["id"]:
-        raise ApiError(404, "ไม่พบผลงานนี้")
-    work.pop("file_key", None)
-    work["has_file"] = bool(row["file_key"])
-    return work
+        raise ApiError(404, "ไม่พบแผนนี้")
+    plan = dict(row)
+    plan["remaining"] = plan["budget"] - plan["spent"]
+    return plan
 
 
-def list_works(req):
-    where, params = [], []
-    scope = req.q("scope", "library")
-    if scope == "mine":
-        where.append("w.user_id = ?")
-        params.append(req.user["id"])
-    elif scope == "review":
-        if req.user["role"] != "admin":
-            raise ApiError(403, "เฉพาะผู้ดูแลระบบเท่านั้น")
-    else:
-        where.append("w.status = 'approved'")
-    if req.q("status"):
-        where.append("w.status = ?")
-        params.append(req.q("status"))
-    if req.q("kind"):
-        where.append("w.kind = ?")
-        params.append(req.q("kind"))
-    if req.q("year"):
-        where.append("w.year = ?")
-        params.append(to_id(req.q("year"), "ปี"))
+def plan_values(b):
+    return {
+        "fiscal_year": to_id(b.get("fiscal_year"), "ปีงบประมาณ"),
+        "seq": to_id(b.get("seq"), "ลำดับ"),
+        "department": to_str(b.get("department"), "หน่วยงาน", True, 200),
+        "budget": to_num(b.get("budget"), "งบประมาณ", True, 0),
+        "spent_initial": to_num(b.get("spent_initial") or 0, "งบที่ใช้ไปก่อนเริ่มใช้ระบบ", True, 0),
+    }
+
+
+def create_plan(req):
+    values = plan_values(req.body)
+    values["created_at"] = now()
+    try:
+        plan_id = req.conn.execute(f"INSERT INTO plans ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+                                   list(values.values())).lastrowid
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "มีลำดับนี้ในปีงบประมาณนี้แล้ว")
+    return get_plan(req.conn, plan_id)
+
+
+def update_plan(req, plan_id):
+    plan = get_plan(req.conn, plan_id)
+    values = plan_values(req.body)
+    if values["budget"] < values["spent_initial"] + (plan["spent"] - plan["spent_initial"]):
+        raise ApiError(400, "งบประมาณน้อยกว่างบที่ใช้ไปแล้ว")
+    try:
+        req.conn.execute(f"UPDATE plans SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                         [*values.values(), plan_id])
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "มีลำดับนี้ในปีงบประมาณนี้แล้ว")
+    return get_plan(req.conn, plan_id)
+
+
+def delete_plan(req, plan_id):
+    plan = get_plan(req.conn, plan_id)
+    if plan["expense_count"]:
+        raise ApiError(409, "แผนนี้มีประวัติการตัดงบแล้ว ลบไม่ได้ ให้ลบรายการตัดงบก่อน")
+    req.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+    return {"ok": True}
+
+
+PLAN_COLUMNS = [
+    ("seq", ["ลำดับ", "ที่"], []),
+    ("department", ["หน่วยงาน", "กลุ่มงาน", "ฝ่าย"], []),
+    ("spent", ["ใช้ไป", "ใช้แล้ว", "เบิกจ่าย"], []),
+    ("budget", ["งบประมาณ", "งบ"], ["ใช้", "เบิก", "คงเหลือ"]),
+]
+
+
+def import_plans(req):
+    year = to_id(req.body.get("fiscal_year"), "ปีงบประมาณ")
+    data = decode_upload(req.body.get("file_data"), "ไฟล์ Excel")
+    sheet = read_xlsx(data)
+    header_row, cols = map_columns(sheet, PLAN_COLUMNS, ["department", "budget"])
+    created = updated = 0
+    errors = []
+    next_seq = (req.conn.execute("SELECT MAX(seq) FROM plans WHERE fiscal_year = ?", (year,)).fetchone()[0] or 0) + 1
+    for i, row in enumerate(sheet[header_row + 1:], start=header_row + 2):
+        cell = lambda key: (row[cols[key]] if key in cols and cols[key] < len(row) else "").strip()
+        if not any(x.strip() for x in row):
+            continue
+        dept = cell("department")
+        if not dept:
+            continue   # แถวสรุปยอดรวมท้ายตาราง
+        if re.fullmatch(r"(รวม|ยอดรวม|รวมทั้งสิ้น).*", dept):
+            continue
+        budget = parse_number(cell("budget"))
+        spent = parse_number(cell("spent")) or 0
+        if budget is None or budget < 0:
+            errors.append(f"แถว {i}: งบประมาณของ \"{dept}\" ไม่ใช่ตัวเลข")
+            continue
+        if spent < 0:
+            errors.append(f"แถว {i}: งบที่ใช้ไปของ \"{dept}\" ติดลบ")
+            continue
+        seq_num = parse_number(cell("seq"))
+        if seq_num is not None and float(seq_num).is_integer():
+            seq = int(seq_num)
+        else:
+            seq, next_seq = next_seq, next_seq + 1
+        existing = req.conn.execute("SELECT id FROM plans WHERE fiscal_year = ? AND seq = ?", (year, seq)).fetchone()
+        if existing:
+            req.conn.execute("UPDATE plans SET department = ?, budget = ?, spent_initial = ? WHERE id = ?",
+                             (dept[:200], budget, spent, existing["id"]))
+            updated += 1
+        else:
+            req.conn.execute(
+                "INSERT INTO plans (fiscal_year, seq, department, budget, spent_initial, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (year, seq, dept[:200], budget, spent, now()))
+            created += 1
+        next_seq = max(next_seq, seq + 1)
+    return {"created": created, "updated": updated, "errors": errors, "warnings": []}
+
+
+def plans_template(req):
+    return xlsx_response("แบบฟอร์มแผนพัฒนาบุคลากร.xlsx",
+                         [("แผนพัฒนาบุคลากร", [["ลำดับ", "หน่วยงาน", "งบประมาณ", "งบประมาณที่ใช้ไป"]])])
+
+
+def add_expense(req, plan_id):
+    plan = get_plan(req.conn, plan_id)
+    amount = to_num(req.body.get("amount"), "จำนวนเงิน", True)
+    if amount <= 0:
+        raise ApiError(400, "จำนวนเงินต้องมากกว่า 0")
+    if amount > plan["remaining"] + 1e-6:
+        raise ApiError(400, f"งบคงเหลือ {plan['remaining']:,.2f} บาท ไม่พอสำหรับ {amount:,.2f} บาท")
+    req.conn.execute(
+        "INSERT INTO plan_expenses (plan_id, spent_on, amount, description, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (plan_id, to_date(req.body.get("spent_on"), "วันที่", True), amount,
+         to_str(req.body.get("description"), "รายการ", True, 500), req.user["id"], now()))
+    return get_plan(req.conn, plan_id)
+
+
+def delete_expense(req, expense_id):
+    if req.conn.execute("DELETE FROM plan_expenses WHERE id = ?", (expense_id,)).rowcount == 0:
+        raise ApiError(404, "ไม่พบรายการนี้")
+    return {"ok": True}
+
+
+def timeline_events(conn, year, plan_id=None):
+    where, params = "p.fiscal_year = ?", [year]
+    if plan_id:
+        where += " AND p.id = ?"
+        params.append(plan_id)
+    events = rows(conn.execute(
+        f"""SELECT e.id, e.plan_id, e.spent_on AS date, e.amount, e.description, e.created_at,
+                   p.seq, p.department, u.prefix, u.first_name, u.last_name
+            FROM plan_expenses e JOIN plans p ON p.id = e.plan_id LEFT JOIN users u ON u.id = e.created_by
+            WHERE {where}""", params))
+    for e in events:
+        e["by"] = f"{e.pop('prefix') or ''}{e.pop('first_name') or ''} {e.pop('last_name') or ''}".strip()
+        e["kind"] = "expense"
+    for p in conn.execute(f"SELECT * FROM plans p WHERE {where} AND p.spent_initial > 0", params):
+        events.append({"id": None, "plan_id": p["id"], "date": p["created_at"][:10], "amount": p["spent_initial"],
+                       "description": "งบที่ใช้ไปตามไฟล์นำเข้า", "seq": p["seq"], "department": p["department"],
+                       "by": "", "kind": "initial", "created_at": p["created_at"]})
+    events.sort(key=lambda e: (e["date"], e["created_at"]))
+    running = 0
+    for e in events:
+        running += e["amount"]
+        e["cumulative"] = running
+    events.reverse()
+    return events
+
+
+def plan_timeline(req):
+    plan_id = to_id(req.q("plan_id"), "แผน", False)
+    return {"fiscal_year": year_param(req), "events": timeline_events(req.conn, year_param(req), plan_id)}
+
+
+# ---------- เอกสาร (คำสั่ง ตรวจสุขภาพ รายงานการประชุม เอกสารอื่น ๆ) ----------
+
+DOC_SELECT = """
+    SELECT d.id, d.category, d.title, d.doc_no, d.doc_date, d.note, d.file_name, d.file_size, d.created_at,
+           u.prefix, u.first_name, u.last_name
+    FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+"""
+
+
+def doc_row(row):
+    d = dict(row)
+    d["uploaded_by"] = f"{d.pop('prefix') or ''}{d.pop('first_name') or ''} {d.pop('last_name') or ''}".strip()
+    return d
+
+
+def list_documents(req):
+    where, params = ["1 = 1"], []
+    if req.q("category"):
+        where.append("d.category = ?")
+        params.append(to_choice(req.q("category"), "หมวดเอกสาร", DOC_CATEGORIES))
     search = req.q("q").strip()
     if search:
-        where.append("(w.title LIKE ? OR w.authors LIKE ? OR w.keywords LIKE ? OR w.abstract LIKE ?)")
-        params += [f"%{search}%"] * 4
-    sql = WORK_SELECT + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY w.updated_at DESC LIMIT 500"
-    result = []
-    for row in req.conn.execute(sql, params):
-        work = dict(row)
-        work["has_file"] = bool(work.pop("file_key"))
-        result.append(work)
-    return result
+        where.append("(d.title LIKE ? OR d.doc_no LIKE ? OR d.note LIKE ?)")
+        params += [f"%{search}%"] * 3
+    if req.q("year"):
+        # ปี พ.ศ. ของวันที่เอกสาร
+        y = to_id(req.q("year"), "ปี") - 543
+        where.append("substr(COALESCE(d.doc_date, d.created_at), 1, 4) = ?")
+        params.append(str(y))
+    return [doc_row(r) for r in req.conn.execute(
+        DOC_SELECT + f" WHERE {' AND '.join(where)} ORDER BY COALESCE(d.doc_date, substr(d.created_at, 1, 10)) DESC, d.id DESC"
+        " LIMIT 1000", params)]
 
 
 def save_pdf(data_b64, name):
     name = to_str(name, "ชื่อไฟล์", True, 200)
     if not name.lower().endswith(".pdf"):
         raise ApiError(400, "แนบได้เฉพาะไฟล์ PDF")
-    try:
-        data = base64.b64decode(data_b64, validate=True)
-    except (ValueError, TypeError):
-        raise ApiError(400, "ไฟล์แนบไม่ถูกต้อง")
+    data = decode_upload(data_b64, "ไฟล์ PDF")
     if not data.startswith(b"%PDF"):
         raise ApiError(400, "ไฟล์แนบไม่ใช่ PDF")
     key = secrets.token_hex(16) + ".pdf"
     (FILES_DIR / key).write_bytes(data)
-    return name, key
+    return name, key, len(data)
 
 
-def work_values(req):
-    b = req.body
-    year = to_id(b.get("year"), "ปี พ.ศ.")
-    if not 2500 <= year <= 2700:
-        raise ApiError(400, "ปี พ.ศ. ไม่ถูกต้อง")
+def doc_values(b):
     return {
-        "kind": to_choice(b.get("kind"), "ประเภทผลงาน", WORK_KINDS),
-        "title": to_str(b.get("title"), "ชื่อผลงาน", True, 300),
-        "authors": to_str(b.get("authors"), "ผู้จัดทำ", True, 500),
-        "abstract": to_str(b.get("abstract"), "บทคัดย่อ", max_len=5000),
-        "keywords": to_str(b.get("keywords"), "คำสำคัญ", max_len=300),
-        "year": year,
+        "category": to_choice(b.get("category"), "หมวดเอกสาร", DOC_CATEGORIES),
+        "title": to_str(b.get("title"), "ชื่อเรื่อง", True, 300),
+        "doc_no": to_str(b.get("doc_no"), "เลขที่", max_len=100),
+        "doc_date": to_date(b.get("doc_date"), "วันที่เอกสาร"),
+        "note": to_str(b.get("note"), "รายละเอียด", max_len=2000),
     }
 
 
-def create_work(req):
-    values = work_values(req)
-    file_name = file_key = None
+def get_document(req, doc_id):
+    row = req.conn.execute(DOC_SELECT + " WHERE d.id = ?", (doc_id,)).fetchone()
+    if row is None:
+        raise ApiError(404, "ไม่พบเอกสารนี้")
+    return doc_row(row)
+
+
+def create_document(req):
+    values = doc_values(req.body)
+    values["file_name"], values["file_key"], values["file_size"] = save_pdf(req.body.get("file_data"), req.body.get("file_name"))
+    values.update(uploaded_by=req.user["id"], created_at=now())
+    doc_id = req.conn.execute(f"INSERT INTO documents ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+                              list(values.values())).lastrowid
+    return get_document(req, doc_id)
+
+
+def update_document(req, doc_id):
+    get_document(req, doc_id)
+    values = doc_values(req.body)
+    old_key = None
     if req.body.get("file_data"):
-        file_name, file_key = save_pdf(req.body["file_data"], req.body.get("file_name"))
+        old_key = req.conn.execute("SELECT file_key FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
+        values["file_name"], values["file_key"], values["file_size"] = save_pdf(req.body["file_data"], req.body.get("file_name"))
+    req.conn.execute(f"UPDATE documents SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                     [*values.values(), doc_id])
+    if old_key:
+        (FILES_DIR / old_key).unlink(missing_ok=True)
+    return get_document(req, doc_id)
+
+
+def delete_document(req, doc_id):
+    row = req.conn.execute("SELECT file_key FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if row is None:
+        raise ApiError(404, "ไม่พบเอกสารนี้")
+    req.conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    (FILES_DIR / row["file_key"]).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+def document_file(req, doc_id):
+    row = req.conn.execute("SELECT file_name, file_key FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if row is None or not (FILES_DIR / row["file_key"]).is_file():
+        raise ApiError(404, "ไม่พบไฟล์เอกสารนี้")
+    return FileResponse(row["file_name"], "application/pdf", path=FILES_DIR / row["file_key"],
+                        inline=req.q("download") != "1")
+
+
+# ---------- HR Clinic ----------
+
+CLINIC_SELECT = """
+    SELECT q.*, u.prefix, u.first_name, u.last_name, u.position,
+           (SELECT COUNT(*) FROM clinic_messages m WHERE m.question_id = q.id) AS message_count
+    FROM clinic_questions q JOIN users u ON u.id = q.user_id
+"""
+
+
+def clinic_row(row):
+    q = dict(row)
+    q["asker"] = f"{q.pop('prefix') or ''}{q.pop('first_name')} {q.pop('last_name')}".strip()
+    return q
+
+
+def list_clinic(req):
+    where, params = ["1 = 1"], []
+    if req.user["role"] != "admin":
+        where.append("q.user_id = ?")
+        params.append(req.user["id"])
+    if req.q("status"):
+        where.append("q.status = ?")
+        params.append(to_choice(req.q("status"), "สถานะ", CLINIC_STATUS))
+    return [clinic_row(r) for r in req.conn.execute(
+        CLINIC_SELECT + f" WHERE {' AND '.join(where)} ORDER BY q.updated_at DESC LIMIT 500", params)]
+
+
+def get_clinic(req, qid):
+    row = req.conn.execute(CLINIC_SELECT + " WHERE q.id = ?", (qid,)).fetchone()
+    # คำถามของคนอื่นตอบว่าไม่พบ ไม่บอกว่ามีอยู่
+    if row is None or (req.user["role"] != "admin" and row["user_id"] != req.user["id"]):
+        raise ApiError(404, "ไม่พบคำถามนี้")
+    q = clinic_row(row)
+    q["messages"] = []
+    for m in req.conn.execute(
+            """SELECT m.*, u.prefix, u.first_name, u.last_name FROM clinic_messages m
+               JOIN users u ON u.id = m.user_id WHERE m.question_id = ? ORDER BY m.id""", (qid,)):
+        msg = dict(m)
+        msg["author"] = "เจ้าหน้าที่ HR" if msg["from_admin"] else \
+            f"{msg.pop('prefix') or ''}{msg.pop('first_name')} {msg.pop('last_name')}".strip()
+        for k in ("prefix", "first_name", "last_name", "user_id"):
+            msg.pop(k, None)
+        q["messages"].append(msg)
+    return q
+
+
+def create_clinic(req):
+    subject = to_str(req.body.get("subject"), "หัวข้อ", True, 200)
+    body = to_str(req.body.get("body"), "คำถาม", True, 5000)
     ts = now()
-    work_id = req.conn.execute(
-        """INSERT INTO works (doc_no, kind, title, authors, abstract, keywords, year, user_id, department_id,
-               file_name, file_key, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)""",
-        (next_doc_no(req.conn, "works", "RI"), *values.values(), req.user["id"], req.user["department_id"],
-         file_name, file_key, ts, ts)).lastrowid
-    return get_work(req, work_id)
+    qid = req.conn.execute(
+        "INSERT INTO clinic_questions (user_id, subject, status, created_at, updated_at) VALUES (?, ?, 'open', ?, ?)",
+        (req.user["id"], subject, ts, ts)).lastrowid
+    req.conn.execute("INSERT INTO clinic_messages (question_id, user_id, from_admin, body, created_at) VALUES (?, ?, 0, ?, ?)",
+                     (qid, req.user["id"], body, ts))
+    return get_clinic(req, qid)
 
 
-def update_work(req, work_id):
-    work = get_work(req, work_id)
-    if work["user_id"] != req.user["id"] and req.user["role"] != "admin":
-        raise ApiError(403, "แก้ไขได้เฉพาะผลงานของตัวเอง")
-    if work["status"] not in ("submitted", "revise") and req.user["role"] != "admin":
-        raise ApiError(409, "ผลงานนี้พิจารณาแล้ว แก้ไขไม่ได้")
-    values = work_values(req)
-    if req.body.get("file_data"):
-        old = req.conn.execute("SELECT file_key FROM works WHERE id = ?", (work_id,)).fetchone()[0]
-        values["file_name"], values["file_key"] = save_pdf(req.body["file_data"], req.body.get("file_name"))
-        if old:
-            (FILES_DIR / old).unlink(missing_ok=True)
-    if work["status"] == "revise" and work["user_id"] == req.user["id"]:
-        values["status"] = "submitted"   # ส่งกลับมาพิจารณาใหม่หลังแก้ไข
-    values["updated_at"] = now()
-    sets = ", ".join(f"{k} = ?" for k in values)
-    req.conn.execute(f"UPDATE works SET {sets} WHERE id = ?", [*values.values(), work_id])
-    return get_work(req, work_id)
+def reply_clinic(req, qid):
+    q = get_clinic(req, qid)
+    body = to_str(req.body.get("body"), "ข้อความ", True, 5000)
+    is_admin = req.user["role"] == "admin" and q["user_id"] != req.user["id"]
+    if q["status"] == "closed" and not is_admin:
+        raise ApiError(409, "เรื่องนี้ปิดแล้ว กรุณาส่งคำถามใหม่")
+    ts = now()
+    req.conn.execute("INSERT INTO clinic_messages (question_id, user_id, from_admin, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (qid, req.user["id"], 1 if is_admin else 0, body, ts))
+    status = "answered" if is_admin else "open"
+    req.conn.execute("UPDATE clinic_questions SET status = ?, updated_at = ? WHERE id = ?", (status, ts, qid))
+    return get_clinic(req, qid)
 
 
-def review_work(req, work_id):
-    get_work(req, work_id)
-    status = to_choice(req.body.get("status"), "ผลการพิจารณา", ("approved", "revise", "rejected"))
-    note = to_str(req.body.get("review_note"), "ความเห็น", status != "approved", 2000)
-    req.conn.execute(
-        "UPDATE works SET status = ?, review_note = ?, reviewer_name = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
-        (status, note, req.user["full_name"], now(), now(), work_id))
-    return get_work(req, work_id)
+def close_clinic(req, qid):
+    get_clinic(req, qid)
+    req.conn.execute("UPDATE clinic_questions SET status = 'closed', updated_at = ? WHERE id = ?", (now(), qid))
+    return get_clinic(req, qid)
 
 
-def work_file(req, work_id):
-    work = get_work(req, work_id)
-    key = req.conn.execute("SELECT file_key FROM works WHERE id = ?", (work_id,)).fetchone()[0]
-    if not key or not (FILES_DIR / key).is_file():
-        raise ApiError(404, "ผลงานนี้ไม่มีไฟล์แนบ")
-    return FileResponse(FILES_DIR / key, work["file_name"])
+# ---------- Dashboard และการส่งออก ----------
 
+def dashboard_data(conn, user, year):
+    staff = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(must_change_password) AS not_activated FROM users WHERE active = 1").fetchone()
+    by_level = rows(conn.execute(
+        "SELECT COALESCE(NULLIF(level, ''), 'ไม่ระบุ') AS label, COUNT(*) AS n FROM users WHERE active = 1"
+        " GROUP BY label ORDER BY n DESC"))
+    by_position = rows(conn.execute(
+        "SELECT COALESCE(NULLIF(position, ''), 'ไม่ระบุ') AS label, COUNT(*) AS n FROM users WHERE active = 1"
+        " GROUP BY label ORDER BY n DESC LIMIT 10"))
+    plans = rows(conn.execute(PLAN_SELECT + " WHERE p.fiscal_year = ? ORDER BY p.seq", (year,)))
+    for p in plans:
+        p["remaining"] = p["budget"] - p["spent"]
+    total_budget = sum(p["budget"] for p in plans)
+    total_spent = sum(p["spent"] for p in plans)
+    docs = {r["category"]: r["n"] for r in conn.execute("SELECT category, COUNT(*) AS n FROM documents GROUP BY category")}
+    clinic_where = "" if user["role"] == "admin" else f" WHERE user_id = {int(user['id'])}"
+    clinic = {r["status"]: r["n"] for r in conn.execute(
+        f"SELECT status, COUNT(*) AS n FROM clinic_questions{clinic_where} GROUP BY status")}
+    latest_docs = [doc_row(r) for r in conn.execute(DOC_SELECT + " ORDER BY d.created_at DESC LIMIT 6")]
+    return {
+        "fiscal_year": year,
+        "years": plan_years(conn),
+        "generated_at": now(),
+        "staff_total": staff["total"],
+        "staff_not_activated": staff["not_activated"] or 0,
+        "by_level": by_level,
+        "by_position": by_position,
+        "plans": plans,
+        "total_budget": total_budget,
+        "total_spent": total_spent,
+        "total_remaining": total_budget - total_spent,
+        "documents": {k: docs.get(k, 0) for k in DOC_CATEGORIES},
+        "clinic": {k: clinic.get(k, 0) for k in CLINIC_STATUS},
+        "latest_documents": latest_docs,
+        "recent_expenses": timeline_events(conn, year)[:6],
+    }
 
-# ---------- หน้าแรก ----------
 
 def dashboard(req):
-    year = fiscal_year(today())
-    user = req.user
-    result = {
-        "fiscal_year": year,
-        "balance": leave_balance_for(req.conn, user, year),
-        "my_pending_leaves": req.conn.execute(
-            "SELECT COUNT(*) FROM leaves WHERE user_id = ? AND status = 'pending'", (user["id"],)).fetchone()[0],
-        "my_works": rows(req.conn.execute(
-            "SELECT status, COUNT(*) AS n FROM works WHERE user_id = ? GROUP BY status", (user["id"],))),
-        "library_count": req.conn.execute("SELECT COUNT(*) FROM works WHERE status = 'approved'").fetchone()[0],
-        "on_leave_today": [],
-    }
-    if user["role"] in ("head", "admin"):
-        dept_where = "" if user["role"] == "admin" else " AND l.department_id = ?"
-        params = [] if user["role"] == "admin" else [user["department_id"]]
-        result["leaves_to_approve"] = req.conn.execute(
-            f"SELECT COUNT(*) FROM leaves l WHERE l.status = 'pending' AND l.user_id != ? {dept_where}",
-            [user["id"], *params]).fetchone()[0]
-        result["on_leave_today"] = rows(req.conn.execute(
-            LEAVE_SELECT + f" WHERE l.status = 'approved' AND l.start_date <= ? AND l.end_date >= ? {dept_where}"
-            " ORDER BY u.full_name", [str(today()), str(today()), *params]))
-        result["license_alerts"] = license_alerts(req)
-    if user["role"] == "admin":
-        result["works_to_review"] = req.conn.execute(
-            "SELECT COUNT(*) FROM works WHERE status = 'submitted'").fetchone()[0]
-        result["staff_count"] = req.conn.execute("SELECT COUNT(*) FROM users WHERE active = 1").fetchone()[0]
-    return result
+    return dashboard_data(req.conn, req.user, year_param(req))
+
+
+def th_date(iso):
+    if not iso:
+        return ""
+    y, m, d = iso[:10].split("-")
+    return f"{d}/{m}/{int(y) + 543}"
+
+
+def export_dashboard(req):
+    d = dashboard_data(req.conn, req.user, year_param(req))
+    pct = lambda a, b: round(a / b * 100, 2) if b else 0
+    summary = [
+        ["หัวข้อ", "ค่า"],
+        ["รายงาน ณ วันที่", th_date(d["generated_at"])],
+        ["ปีงบประมาณ", d["fiscal_year"]],
+        ["จำนวนบุคลากร (คน)", d["staff_total"]],
+        ["งบประมาณแผนพัฒนาบุคลากรรวม (บาท)", d["total_budget"]],
+        ["ใช้ไปแล้ว (บาท)", d["total_spent"]],
+        ["คงเหลือ (บาท)", d["total_remaining"]],
+        ["ใช้ไปแล้ว (%)", pct(d["total_spent"], d["total_budget"])],
+        *[[f"เอกสาร: {DOC_CATEGORIES[k]} (ฉบับ)", v] for k, v in d["documents"].items()],
+        *[[f"HR Clinic: {CLINIC_STATUS[k]} (เรื่อง)", v] for k, v in d["clinic"].items()],
+    ]
+    plans = [["ลำดับ", "หน่วยงาน", "งบประมาณ", "ใช้ไป", "คงเหลือ", "ใช้ไป (%)"]] + [
+        [p["seq"], p["department"], p["budget"], p["spent"], p["remaining"], pct(p["spent"], p["budget"])]
+        for p in d["plans"]]
+    timeline = [["วันที่", "ลำดับแผน", "หน่วยงาน", "รายการ", "จำนวนเงิน", "ยอดใช้สะสม", "ผู้บันทึก"]] + [
+        [th_date(e["date"]), e["seq"], e["department"], e["description"], e["amount"], e["cumulative"], e["by"]]
+        for e in timeline_events(req.conn, d["fiscal_year"])]
+    levels = [["ระดับ", "จำนวน (คน)"]] + [[r["label"], r["n"]] for r in d["by_level"]]
+    positions = [["ตำแหน่ง", "จำนวน (คน)"]] + [[r["label"], r["n"]] for r in d["by_position"]]
+    return xlsx_response(f"สรุปภาพรวม HR ปีงบ {d['fiscal_year']}.xlsx", [
+        ("สรุป", summary), ("แผนพัฒนาบุคลากร", plans), ("ประวัติการตัดงบ", timeline),
+        ("บุคลากรตามระดับ", levels), ("บุคลากรตามตำแหน่ง", positions)])
 
 
 # ---------- เส้นทาง API ----------
@@ -860,41 +1230,47 @@ ID = r"(\d+)"
 
 
 def route(method, pattern, handler, access="user"):
-    """access: public = ไม่ต้องล็อกอิน, user = ทุกคนที่ล็อกอิน, manager = หัวหน้างานหรือผู้ดูแล, admin = ผู้ดูแลระบบ"""
+    """access: public = ไม่ต้องล็อกอิน, self = ล็อกอินแล้ว (ใช้ได้แม้ยังไม่เปลี่ยนรหัสครั้งแรก),
+    user = ทุกคนที่ล็อกอินและเปลี่ยนรหัสแล้ว, admin = ผู้ดูแลระบบ"""
     ROUTES.append((method, re.compile(f"^/api{pattern}$"), handler, access))
 
 
 route("GET", "/setup", setup_status, "public")
 route("POST", "/setup", setup, "public")
 route("POST", "/login", login, "public")
-route("POST", "/logout", logout)
-route("GET", "/me", me)
-route("PUT", "/me", update_me)
-route("POST", "/me/password", change_password)
-route("GET", "/meta", meta)
+route("POST", "/logout", logout, "self")
+route("GET", "/me", me, "self")
+route("POST", "/me/password", change_password, "self")
+route("GET", "/meta", meta, "self")
 route("GET", "/dashboard", dashboard)
-route("GET", "/departments", list_departments)
-route("POST", "/departments", create_department, "admin")
-route("PUT", f"/departments/{ID}", update_department, "admin")
-route("GET", "/users", list_users, "manager")
+route("GET", "/export/dashboard.xlsx", export_dashboard)
+route("GET", "/users", list_users, "admin")
 route("POST", "/users", create_user, "admin")
+route("POST", "/users/import", import_users, "admin")
+route("GET", "/templates/users.xlsx", users_template, "admin")
 route("PUT", f"/users/{ID}", update_user, "admin")
-route("GET", "/license-alerts", license_alerts, "manager")
-route("GET", "/leaves", list_leaves)
-route("POST", "/leaves", create_leave)
-route("GET", "/leaves/balance", leave_balance)
-route("GET", f"/leaves/{ID}", get_leave)
-route("POST", f"/leaves/{ID}/cancel", cancel_leave)
-route("POST", f"/leaves/{ID}/approve", approve_leave, "manager")
-route("POST", f"/leaves/{ID}/reject", reject_leave, "manager")
-route("GET", "/works", list_works)
-route("POST", "/works", create_work)
-route("GET", f"/works/{ID}", get_work)
-route("PUT", f"/works/{ID}", update_work)
-route("POST", f"/works/{ID}/review", review_work, "admin")
-route("GET", f"/works/{ID}/file", work_file)
+route("POST", f"/users/{ID}/reset-password", reset_password, "admin")
+route("GET", "/plans", list_plans)
+route("POST", "/plans", create_plan, "admin")
+route("POST", "/plans/import", import_plans, "admin")
+route("GET", "/plans/timeline", plan_timeline)
+route("GET", "/templates/plans.xlsx", plans_template, "admin")
+route("PUT", f"/plans/{ID}", update_plan, "admin")
+route("POST", f"/plans/{ID}/delete", delete_plan, "admin")
+route("POST", f"/plans/{ID}/expenses", add_expense, "admin")
+route("POST", f"/expenses/{ID}/delete", delete_expense, "admin")
+route("GET", "/documents", list_documents)
+route("POST", "/documents", create_document, "admin")
+route("GET", f"/documents/{ID}/file", document_file)
+route("PUT", f"/documents/{ID}", update_document, "admin")
+route("POST", f"/documents/{ID}/delete", delete_document, "admin")
+route("GET", "/clinic", list_clinic)
+route("POST", "/clinic", create_clinic)
+route("GET", f"/clinic/{ID}", get_clinic)
+route("POST", f"/clinic/{ID}/reply", reply_clinic)
+route("POST", f"/clinic/{ID}/close", close_clinic)
 
-UPLOAD_PATHS = re.compile(r"^/api/works(/\d+)?$")
+UPLOAD_PATHS = re.compile(r"^/api/(documents(/\d+)?|users/import|plans/import)$")
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -907,7 +1283,7 @@ STATIC_TYPES = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TPYHub/1.0"
+    server_version = "TPYHR/2.0"
 
     def do_GET(self):
         self.dispatch("GET")
@@ -939,12 +1315,13 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with conn:
                         req = Request(conn, body, parse_qs(url.query), user_from_cookie(conn, self.headers.get("Cookie")))
-                        if access != "public" and req.user is None:
-                            raise ApiError(401, "กรุณาเข้าสู่ระบบ")
-                        if access == "admin" and req.user["role"] != "admin":
-                            raise ApiError(403, "เฉพาะผู้ดูแลระบบเท่านั้น")
-                        if access == "manager" and req.user["role"] not in ("admin", "head"):
-                            raise ApiError(403, "เฉพาะหัวหน้างานหรือผู้ดูแลระบบเท่านั้น")
+                        if access != "public":
+                            if req.user is None:
+                                raise ApiError(401, "กรุณาเข้าสู่ระบบ")
+                            if access != "self" and req.user["must_change_password"]:
+                                raise ApiError(403, "กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน")
+                            if access == "admin" and req.user["role"] != "admin":
+                                raise ApiError(403, "เฉพาะผู้ดูแลระบบเท่านั้น")
                         result = handler(req, *[int(g) for g in match.groups()])
                         cookies = req.cookies
                 finally:
@@ -962,7 +1339,7 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self, limit):
         length = int(self.headers.get("Content-Length") or 0)
         if length > limit:
-            raise ApiError(413, "ข้อมูลใหญ่เกินไป (ไฟล์ PDF ต้องไม่เกิน 15 MB)")
+            raise ApiError(413, "ไฟล์ใหญ่เกินไป (ต้องไม่เกิน 15 MB)")
         if not length:
             return {}
         try:
@@ -985,13 +1362,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_file(self, file):
-        data = file.path.read_bytes()
+        data = file.data if file.data is not None else file.path.read_bytes()
         ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", file.name)
+        disposition = "inline" if file.inline else "attachment"
         self.send_response(200)
         self.send_header("Content-Type", file.content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Disposition",
-                         f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file.name)}")
+                         f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file.name)}")
         self.send_header("Cache-Control", "private, no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
@@ -1022,7 +1400,7 @@ def main():
     init_db()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{'127.0.0.1' if HOST in ('0.0.0.0', '') else HOST}:{PORT}"
-    print(f"TPY Hub กำลังทำงานที่ {url}  (กด Ctrl+C เพื่อหยุด)")
+    print(f"TPY HR กำลังทำงานที่ {url}  (กด Ctrl+C เพื่อหยุด)")
     print(f"ฐานข้อมูล: {DB_PATH}")
     if "--open" in sys.argv:
         webbrowser.open(url)

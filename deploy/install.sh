@@ -1,5 +1,5 @@
 #!/bin/sh
-# ติดตั้งหรืออัปเดต TPY Hub บนเซิร์ฟเวอร์ Ubuntu (รันด้วย root)
+# ติดตั้งหรืออัปเดต TPY HR บนเซิร์ฟเวอร์ Ubuntu (รันด้วย root)
 # โค้ดอยู่ที่ /opt/tpy-hub ข้อมูลจริงอยู่ที่ /var/lib/tpy-hub (ไม่ถูกเขียนทับตอนอัปเดต)
 set -e
 REPO="${1:-https://github.com/NOK125/tpy-hub.git}"
@@ -18,4 +18,4 @@ systemctl enable tpy-hub
 systemctl restart tpy-hub
 sleep 2
 systemctl --no-pager status tpy-hub | head -5
-curl -s http://127.0.0.1:8100/api/setup && echo && echo "TPY Hub พร้อมใช้งานที่พอร์ต 8100"
+curl -s http://127.0.0.1:8100/api/setup && echo && echo "TPY HR พร้อมใช้งานที่พอร์ต 8100"
