@@ -176,6 +176,13 @@ td .btn { vertical-align: middle; }
 .mini-meter .bar { flex: 1; margin: 0; }
 .doc-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .5rem; margin-bottom: 1rem; }
 .doc-counts .stat b { font-size: 1.3rem; }
+[hidden] { display: none !important; }
+.subtabs { display: flex; gap: .3rem; margin: 0 0 1rem; padding: .3rem; overflow-x: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+.subtabs button { flex: 1 0 auto; font: inherit; cursor: pointer; border: 0; background: none; color: var(--muted);
+  padding: .55rem 1rem; border-radius: 9px; white-space: nowrap; }
+.subtabs button:hover { color: var(--text); background: var(--bg); }
+.subtabs button[aria-selected="true"] { background: var(--primary); color: var(--primary-text); font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: .45rem; }
 .chip { font: inherit; cursor: pointer; padding: .35rem .8rem; border-radius: 99px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 .chip b { margin-left: .25rem; color: var(--primary); }

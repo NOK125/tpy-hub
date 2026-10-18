@@ -512,58 +512,202 @@ async function clinicView() {
 
 // ---------- ข้อมูลบุคลากร (ทุกคนดูได้) ----------
 
+const USERS_IMPORT_INTRO = "ไฟล์ต้องมีหัวตาราง: ลำดับ, คำนำหน้า, ชื่อ, นามสกุล, หมายเลขบัตร, ตำแหน่ง, ระดับ และใส่ กลุ่มงาน, กลุ่มวิชาชีพ เพิ่มได้ (ถ้าไม่มีกลุ่มวิชาชีพ ระบบเดาจากตำแหน่ง) · คนใหม่ได้รหัสผ่านครั้งแรกเป็นเลขบัตร 5 ตัวท้าย · ถ้าเลขบัตรมีในระบบแล้ว ระบบจะอัปเดตข้อมูลโดยไม่เปลี่ยนรหัสผ่าน";
+const MOVE_BADGE = { hire: "ok", transfer_in: "info", resign: "bad", transfer_out: "warn" };
+const STAFF_TABS = [["list", "รายชื่อ"], ["retention", "อัตราการคงอยู่"], ["moves", "ประวัติเข้า-ออก", "admin"]];
+let staffTab = "list";
+let staffGroupBy = "profession_group";
+try { staffTab = sessionStorage.getItem("staff-tab") || "list"; } catch {}
+
+function countBy(list, key) {
+  const m = new Map();
+  for (const s of list) { const k = s[key] || "ไม่ระบุ"; m.set(k, (m.get(k) || 0) + 1); }
+  return [...m].sort((a, b) => b[1] - a[1]);
+}
+
 async function staffView() {
-  const staff = await api("GET", "/staff");
-  const count = (key) => {
-    const m = new Map();
-    for (const s of staff) { const k = s[key] || "ไม่ระบุ"; m.set(k, (m.get(k) || 0) + 1); }
-    return [...m].sort((a, b) => b[1] - a[1]);
-  };
-  const levels = count("level");
-  const positions = count("position");
-  const filter = { q: "", level: "", position: "" };
+  const admin = isAdmin();
+  const tabs = STAFF_TABS.filter((t) => !t[2] || admin);
+  if (!tabs.some((t) => t[0] === staffTab)) staffTab = "list";
   view.innerHTML = `
-    <div class="toolbar"><h2>ข้อมูลบุคลากร <small>(${num(staff.length)} คน)</small></h2>
-      ${isAdmin() ? `<a class="btn" href="/api/export/staff.xlsx">ดาวน์โหลด Excel</a>` : ""}
+    <div class="toolbar"><h2>ข้อมูลบุคลากร</h2>
+      ${admin ? `<button class="btn" data-act="import-staff">นำเข้ารายชื่อ Excel</button>
+        <a class="btn" href="/api/export/staff.xlsx${currentYear ? "?year=" + currentYear : ""}">ดาวน์โหลด Excel</a>` : ""}
     </div>
+    <div class="subtabs" role="tablist">${tabs.map(([k, label]) =>
+      `<button type="button" role="tab" data-act="subtab" data-id="${k}" aria-selected="${k === staffTab}">${label}</button>`).join("")}</div>
+    <div id="staff-body"></div>`;
+  bind({
+    subtab: (k) => { staffTab = k; try { sessionStorage.setItem("staff-tab", k); } catch {} refresh(); },
+    "import-staff": () => importForm({ title: "นำเข้ารายชื่อบุคลากรจาก Excel", path: "/users/import", template: "users.xlsx", intro: USERS_IMPORT_INTRO }),
+    ...(await ({ list: staffListTab, retention: retentionTab, moves: movesTab }[staffTab])($("#staff-body"))),
+  });
+}
+
+async function staffListTab(body) {
+  const staff = await api("GET", "/staff");
+  const levels = countBy(staff, "level");
+  const positions = countBy(staff, "position");
+  const depts = countBy(staff, "department");
+  const profs = countBy(staff, "profession_group");
+  const filter = { q: "", level: "", position: "", department: "", profession_group: "" };
+  const select = (id, all, items) => `<select id="${id}">${option("", all)}${items.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>`;
+  body.innerHTML = `
     <div class="stats">
       <div class="stat"><b>${num(staff.length)}</b><span>บุคลากรทั้งหมด (คน)</span></div>
+      <div class="stat"><b>${num(profs.length)}</b><span>กลุ่มวิชาชีพ</span></div>
+      <div class="stat"><b>${num(depts.filter(([k]) => k !== "ไม่ระบุ").length)}</b><span>กลุ่มงาน</span></div>
       <div class="stat"><b>${num(positions.length)}</b><span>ตำแหน่ง</span></div>
-      <div class="stat"><b>${num(levels.length)}</b><span>ระดับ</span></div>
     </div>
-    <section class="card"><h2>จำนวนตามระดับ <small>กดเพื่อกรอง</small></h2>
-      <div class="chips" id="level-chips">${levels.map(([k, n]) =>
-        `<button type="button" class="chip" data-act="level" data-id="${esc(k)}">${esc(k)} <b>${num(n)}</b></button>`).join("")}</div>
+    <section class="card"><h2>จำนวนตามกลุ่มวิชาชีพ <small>กดเพื่อกรอง</small></h2>
+      <div class="chips" id="prof-chips">${profs.map(([k, n]) =>
+        `<button type="button" class="chip" data-act="prof" data-id="${esc(k)}">${esc(k)} <b>${num(n)}</b></button>`).join("")}</div>
     </section>
     <div class="toolbar">
       <input type="search" id="q" placeholder="ค้นหาชื่อ ตำแหน่ง ระดับ">
-      <select id="pos">${option("", "ทุกตำแหน่ง")}${positions.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>
-      <select id="lv">${option("", "ทุกระดับ")}${levels.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>
+      ${select("f-dept", "ทุกกลุ่มงาน", depts)}${select("f-pos", "ทุกตำแหน่ง", positions)}${select("f-lv", "ทุกระดับ", levels)}
     </div>
     <section class="list" id="list"></section>`;
   const draw = () => {
     const q = filter.q.toLowerCase();
-    const shown = staff.filter((s) =>
-      (!q || `${s.full_name} ${s.position || ""} ${s.level || ""}`.toLowerCase().includes(q))
-      && (!filter.level || (s.level || "ไม่ระบุ") === filter.level)
-      && (!filter.position || (s.position || "ไม่ระบุ") === filter.position));
-    $$("#level-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.id === filter.level));
+    const is = (s, key) => !filter[key] || (s[key] || "ไม่ระบุ") === filter[key];
+    const shown = staff.filter((s) => (!q || `${s.full_name} ${s.position || ""} ${s.level || ""}`.toLowerCase().includes(q))
+      && is(s, "level") && is(s, "position") && is(s, "department") && is(s, "profession_group"));
+    $$("#prof-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.id === filter.profession_group));
     $("#list").innerHTML = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(staff.length)} คน</p>` +
-      table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ"], shown.map((s) =>
-        [esc(s.seq ?? "-"), esc(s.full_name), esc(s.position || "-"), esc(s.level || "-")]),
+      table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ", "กลุ่มงาน", "กลุ่มวิชาชีพ"], shown.map((s) =>
+        [esc(s.seq ?? "-"), esc(s.full_name), esc(s.position || "-"), esc(s.level || "-"), esc(s.department || "-"), esc(s.profession_group || "-")]),
       staff.length ? "ไม่พบบุคลากรที่ค้นหา" : "ยังไม่มีข้อมูลบุคลากร");
   };
   $("#q").oninput = (e) => { filter.q = e.target.value.trim(); draw(); };
-  $("#pos").onchange = (e) => { filter.position = e.target.value; draw(); };
-  $("#lv").onchange = (e) => { filter.level = e.target.value; draw(); };
-  bind({
-    level: (k) => {
-      filter.level = filter.level === k ? "" : k;
-      $("#lv").value = filter.level;
-      draw();
+  $("#f-dept").onchange = (e) => { filter.department = e.target.value; draw(); };
+  $("#f-pos").onchange = (e) => { filter.position = e.target.value; draw(); };
+  $("#f-lv").onchange = (e) => { filter.level = e.target.value; draw(); };
+  draw();
+  return { prof: (k) => { filter.profession_group = filter.profession_group === k ? "" : k; draw(); } };
+}
+
+const rateText = (r) => (r == null ? "-" : `${num(r)}%`);
+const rateClass = (r) => (r == null ? "" : r >= 90 ? "plus" : r < 80 ? "minus" : "");
+
+async function retentionTab(body) {
+  const t = await api("GET", `/staff/retention?by=${staffGroupBy}${currentYear ? "&year=" + currentYear : ""}`);
+  currentYear = t.fiscal_year;
+  const label = META.group_by[t.by];
+  const row = (r, isTotal = false) => [
+    isTotal ? `<b>${esc(r.group)}</b>` : `${esc(r.group)}${r.inconsistent ? ` ${badge("ตรวจข้อมูล", "warn")}` : ""}`,
+    [num(r.start), "num"], [num(r.hire), "num"], [num(r.transfer_in), "num"], [num(r.resign), "num"],
+    [num(r.transfer_out), "num"], [num(r.end), "num"],
+    [`<div class="mini-meter">${bar(r.rate ?? 0, 100, r.rate != null && r.rate < 80 ? "over" : "")}<b class="${rateClass(r.rate)}">${rateText(r.rate)}</b></div>`, "num"],
+  ];
+  const maxTrend = 100;
+  body.innerHTML = `
+    <div class="toolbar">
+      ${yearSelect(t.years, t.fiscal_year)}
+      <div class="chips">${Object.entries(META.group_by).map(([k, v]) =>
+        `<button type="button" class="chip ${k === t.by ? "on" : ""}" data-act="groupby" data-id="${k}">แยกตาม${v}</button>`).join("")}</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b class="${rateClass(t.total.rate)}">${rateText(t.total.rate)}</b><span>อัตราการคงอยู่ทั้งโรงพยาบาล ปีงบ ${t.fiscal_year}</span></div>
+      <div class="stat"><b>${num(t.total.start)}</b><span>บุคลากรต้นปีงบ (1 ต.ค.)</span></div>
+      <div class="stat"><b>${num(t.total.left)}</b><span>ลาออก + ย้ายออก</span></div>
+      <div class="stat"><b>${num(t.total.hire + t.total.transfer_in)}</b><span>รับใหม่ + รับย้ายเข้า</span></div>
+    </div>
+    <p class="hint"><b>สูตร:</b> อัตราการคงอยู่ = (บุคลากรต้นปีงบ − ลาออก − ย้ายออก) ÷ บุคลากรต้นปีงบ × 100 ·
+      ช่วงเวลา ${when(t.start_date, false)} – ${when(t.end_date, false)} ·
+      ต้นปีงบคำนวณจากรายชื่อปัจจุบันย้อนกลับด้วยประวัติเข้า-ออก ${t.total.inconsistent ? `<br><b>มีกลุ่มที่ตัวเลขไม่สอดคล้อง</b> (เช่น คนออกมากกว่าคนต้นปี) มักเกิดจากรายชื่อปัจจุบันยังไม่ครบ หรือประวัติเข้า-ออกยังไม่ครบ` : ""}</p>
+    <section class="list"><h2>อัตราการคงอยู่ แยกตาม${label}</h2>
+      ${table([label, ["ต้นปีงบ", "num"], ["รับใหม่", "num"], ["รับย้ายเข้า", "num"], ["ลาออก", "num"], ["ย้ายออก", "num"], ["ปลายปีงบ", "num"], ["อัตราการคงอยู่", "num"]],
+        t.groups.length ? [...t.groups.map((r) => row(r)), row(t.total, true)] : [], "ยังไม่มีข้อมูลบุคลากร")}
+    </section>
+    <section class="card"><h2>แนวโน้มอัตราการคงอยู่ทั้งโรงพยาบาล</h2>
+      <div class="meter-list">${t.trend.map((y) => `<div class="meter">
+        <div class="meter-label"><span>ปีงบประมาณ ${y.fiscal_year}</span><small class="${rateClass(y.rate)}">${rateText(y.rate)}</small></div>
+        ${bar(y.rate ?? 0, maxTrend, y.rate != null && y.rate < 80 ? "over" : "")}</div>`).join("")}</div>
+    </section>`;
+  $("#year").onchange = (e) => { currentYear = e.target.value; refresh(); };
+  return { groupby: (k) => { staffGroupBy = k; refresh(); } };
+}
+
+function movementForm(staff) {
+  const kinds = Object.entries(META.move_kinds);
+  const form = openForm({
+    title: "บันทึกบุคลากรเข้า-ออก",
+    wide: true,
+    two: true,
+    values: { kind: "resign", moved_on: todayIso(), deactivate: true },
+    intro: `<p class="hint">ลาออก/ย้ายออก: เลือกชื่อจากรายชื่อ ระบบจะปิดบัญชีของคนนั้นให้ · รับใหม่/รับย้ายเข้า: กรอกชื่อ ถ้าใส่เลขบัตรประชาชน ระบบจะเพิ่มเป็นผู้ใช้ให้ด้วย</p>`,
+    fields: [
+      { name: "kind", label: "ประเภท", type: "select", required: true, options: kinds },
+      { name: "moved_on", label: "วันที่มีผล", type: "date", required: true },
+      { name: "user_id", label: "เลือกจากรายชื่อบุคลากร", type: "select", wide: true,
+        options: [["", "— ไม่เลือก (กรอกชื่อเอง) —"], ...staff.map((s) => [s.id, `${s.full_name}${s.position ? " · " + s.position : ""}`])] },
+      { name: "prefix", label: "คำนำหน้า" },
+      { name: "first_name", label: "ชื่อ" },
+      { name: "last_name", label: "นามสกุล" },
+      { name: "national_id", label: "เลขบัตรประชาชน (ถ้าจะเพิ่มเป็นผู้ใช้)", inputmode: "numeric", maxlength: 17 },
+      { name: "position", label: "ตำแหน่ง" },
+      { name: "employment_type", label: "ประเภทการจ้าง", placeholder: "เช่น ข้าราชการ, พกส., ลูกจ้างชั่วคราว" },
+      { name: "department", label: "กลุ่มงาน" },
+      { name: "profession_group", label: "กลุ่มวิชาชีพ", hint: "เว้นว่างได้ ระบบเดาจากตำแหน่ง" },
+      { name: "note", label: "หมายเหตุ", wide: true, placeholder: "เช่น ย้ายไป รพ.อรัญประเทศ" },
+      { name: "deactivate", label: "ปิดบัญชีผู้ใช้ของคนที่ลาออก/ย้ายออก", type: "checkbox" },
+    ],
+    onSubmit: async (d) => {
+      if (!d.user_id && (!d.first_name || !d.last_name)) throw new Error("กรุณาเลือกจากรายชื่อ หรือกรอกชื่อและนามสกุล");
+      const r = await api("POST", "/movements", d);
+      toast(r.note ? `บันทึกแล้ว · ${r.note}` : "บันทึกแล้ว");
+      refresh();
     },
   });
-  draw();
+  // เลือกจากรายชื่อแล้วไม่ต้องกรอกชื่อ/เลขบัตร
+  const pick = $("[name=user_id]", form);
+  const toggle = () => ["prefix", "first_name", "last_name", "national_id"].forEach((n) => {
+    const f = $(`[name=${n}]`, form).closest(".field");
+    f.hidden = Boolean(pick.value);
+  });
+  pick.onchange = toggle;
+  toggle();
+}
+
+async function movesTab(body) {
+  const year = currentYear || META.fiscal_year;
+  let kind = "";
+  try { kind = sessionStorage.getItem("move-kind") || ""; } catch {}
+  const [moves, staff, ret] = await Promise.all([
+    api("GET", `/movements?year=${year}${kind ? "&kind=" + kind : ""}`), api("GET", "/staff"),
+    api("GET", `/staff/retention?year=${year}`)]);
+  currentYear = ret.fiscal_year;
+  body.innerHTML = `
+    <div class="toolbar">
+      ${yearSelect(ret.years, ret.fiscal_year)}
+      <select id="kind">${option("", "ทุกประเภท", kind)}${Object.entries(META.move_kinds).map(([k, v]) => option(k, v, kind)).join("")}</select>
+      <button class="btn" data-act="import-moves">นำเข้า Excel</button>
+      <button class="btn primary" data-act="new-move">+ บันทึกเข้า-ออก</button>
+    </div>
+    <section class="list">
+      ${table(["วันที่", "ประเภท", "ชื่อ-นามสกุล", "ตำแหน่ง", "กลุ่มงาน", "กลุ่มวิชาชีพ", "หมายเหตุ", ""], moves.map((m) => [
+        when(m.moved_on, false), badge(META.move_kinds[m.kind], MOVE_BADGE[m.kind]),
+        esc(`${m.prefix || ""}${m.first_name} ${m.last_name}`), esc(m.position || "-"), esc(m.department || "-"),
+        esc(m.profession_group || "-"), esc(m.note || ""), actions(btn("del-move", "ลบ", m.id, "danger")),
+      ]), `ไม่มีรายการในปีงบประมาณ ${ret.fiscal_year}`)}
+    </section>`;
+  $("#year").onchange = (e) => { currentYear = e.target.value; refresh(); };
+  $("#kind").onchange = (e) => { try { sessionStorage.setItem("move-kind", e.target.value); } catch {} refresh(); };
+  return {
+    "new-move": () => movementForm(staff),
+    "import-moves": () => importForm({
+      title: "นำเข้าบุคลากรเข้า-ออกจาก Excel",
+      path: "/movements/import",
+      template: "movements.xlsx",
+      intro: "หัวตาราง: วันที่, ประเภท (รับใหม่/รับย้ายเข้า/ลาออก/ย้ายออก), ชื่อ-สกุล (หรือ ชื่อ กับ นามสกุล), ตำแหน่ง และใส่ ประเภทการจ้าง, กลุ่มงาน, กลุ่มวิชาชีพ, หมายเหตุ เพิ่มได้ · วันที่ใช้ได้ทั้ง 1/10/2569 และ 1 ต.ค. 69 · แถวที่ซ้ำกับของเดิมจะถูกข้าม · ไฟล์ .xls แบบเก่า ให้เปิดใน Excel แล้วบันทึกเป็น .xlsx ก่อน",
+    }),
+    "del-move": async (id) => {
+      const m = moves.find((x) => String(x.id) === id);
+      if (!confirm(`ลบรายการ${META.move_kinds[m.kind]}ของ ${m.first_name} ${m.last_name}?\n(บัญชีผู้ใช้ที่ถูกปิดไปแล้วจะไม่ถูกเปิดคืนอัตโนมัติ)`)) return;
+      try { await api("POST", `/movements/${id}/delete`, {}); toast("ลบแล้ว"); refresh(); } catch (e) { toast(e.message, true); }
+    },
+  };
 }
 
 // ---------- ผู้ใช้งาน (ผู้ดูแลระบบ) ----------
@@ -583,6 +727,8 @@ function userForm(user) {
       { name: "last_name", label: "นามสกุล", required: true },
       { name: "position", label: "ตำแหน่ง" },
       { name: "level", label: "ระดับ" },
+      { name: "department", label: "กลุ่มงาน" },
+      { name: "profession_group", label: "กลุ่มวิชาชีพ", hint: "เว้นว่างได้ ระบบเดาจากตำแหน่ง" },
       { name: "role", label: "สิทธิ์", type: "select", required: true, options: Object.entries(META.roles) },
       { name: "active", label: "เปิดใช้งาน", type: "checkbox" },
     ],
@@ -630,7 +776,7 @@ async function usersView() {
       title: "นำเข้าผู้ใช้งานจาก Excel",
       path: "/users/import",
       template: "users.xlsx",
-      intro: "ไฟล์ต้องมีหัวตาราง: ลำดับ, คำนำหน้า, ชื่อ, นามสกุล, หมายเลขบัตร, ตำแหน่ง, ระดับ · คนใหม่ได้รหัสผ่านครั้งแรกเป็นเลขบัตร 5 ตัวท้าย · ถ้าเลขบัตรมีในระบบแล้ว ระบบจะอัปเดตชื่อ ตำแหน่ง และระดับ โดยไม่เปลี่ยนรหัสผ่าน",
+      intro: USERS_IMPORT_INTRO,
     }),
     reset: async (id) => {
       const u = byId(id);

@@ -116,6 +116,23 @@ CREATE INDEX IF NOT EXISTS idx_hr_expenses_plan ON plan_expenses(plan_id);
 CREATE INDEX IF NOT EXISTS idx_hr_docs_cat ON documents(category, doc_date);
 CREATE INDEX IF NOT EXISTS idx_hr_clinic_user ON clinic_questions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_hr_clinic_msg ON clinic_messages(question_id);
+CREATE TABLE IF NOT EXISTS staff_movements (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    moved_on TEXT NOT NULL,
+    prefix TEXT,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    position TEXT,
+    employment_type TEXT,
+    department TEXT,
+    profession_group TEXT,
+    note TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hr_moves_date ON staff_movements(moved_on);
 """
 
 ROLES = {"admin": "ผู้ดูแลระบบ", "user": "ผู้ใช้งาน"}
@@ -193,6 +210,11 @@ def init_db():
             conn.commit()
             conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        for col in ("department", "profession_group"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        conn.commit()
     finally:
         conn.close()
 
@@ -639,6 +661,8 @@ def meta(req):
         "roles": ROLES,
         "doc_categories": DOC_CATEGORIES,
         "clinic_status": CLINIC_STATUS,
+        "move_kinds": MOVE_KINDS,
+        "group_by": GROUP_BY,
         "fiscal_year": fiscal_year(today()),
         "min_password": MIN_PASSWORD,
     }
@@ -666,6 +690,8 @@ def user_values(b):
         "last_name": to_str(b.get("last_name"), "นามสกุล", True, 100),
         "position": to_str(b.get("position"), "ตำแหน่ง", max_len=150),
         "level": to_str(b.get("level"), "ระดับ", max_len=100),
+        "department": to_str(b.get("department"), "กลุ่มงาน", max_len=150),
+        "profession_group": to_str(b.get("profession_group"), "กลุ่มวิชาชีพ", max_len=100),
         "role": to_choice(b.get("role", "user"), "สิทธิ์", ROLES),
         "active": 1 if to_bool(b.get("active", True)) else 0,
     }
@@ -715,6 +741,8 @@ USER_COLUMNS = [
     ("prefix", ["คำนำหน้า"], []),
     ("last_name", ["นามสกุล", "สกุล"], []),
     ("national_id", ["บัตร", "เลขประจำตัว"], []),
+    ("department", ["กลุ่มงาน", "หน่วยงาน"], []),
+    ("profession_group", ["กลุ่มวิชาชีพ", "วิชาชีพ"], []),
     ("first_name", ["ชื่อ"], ["นามสกุล", "คำนำหน้า"]),
     ("position", ["ตำแหน่ง"], []),
     ("level", ["ระดับ"], []),
@@ -755,6 +783,13 @@ def import_users(req):
             "position": cell("position")[:150] or None,
             "level": cell("level")[:100] or None,
         }
+        # กลุ่มงาน/กลุ่มวิชาชีพ อัปเดตเฉพาะเมื่อไฟล์มีคอลัมน์นี้ ถ้าไม่มีกลุ่มวิชาชีพ ระบบเดาจากตำแหน่ง
+        if "department" in cols:
+            values["department"] = cell("department")[:150] or None
+        if cell("profession_group"):
+            values["profession_group"] = cell("profession_group")[:100]
+        elif values["position"]:
+            values["profession_group"] = guess_profession(values["position"])
         existing = req.conn.execute("SELECT id FROM users WHERE national_id = ?", (nid,)).fetchone()
         if existing:
             req.conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
@@ -771,16 +806,47 @@ def import_users(req):
 
 def users_template(req):
     return xlsx_response("แบบฟอร์มนำเข้าผู้ใช้.xlsx",
-                         [("ผู้ใช้", [["ลำดับ", "คำนำหน้า", "ชื่อ", "นามสกุล", "หมายเลขบัตร", "ตำแหน่ง", "ระดับ"]])])
+                         [("ผู้ใช้", [["ลำดับ", "คำนำหน้า", "ชื่อ", "นามสกุล", "หมายเลขบัตร", "ตำแหน่ง", "ระดับ",
+                                   "กลุ่มงาน", "กลุ่มวิชาชีพ"]])])
 
 
 # ---------- ข้อมูลบุคลากร (ทุกคนดูได้ ไม่มีเลขบัตรประชาชน) ----------
 
+UNSPECIFIED = "ไม่ระบุ"
+
+# เดากลุ่มวิชาชีพจากชื่อตำแหน่ง (ใช้เมื่อไม่ได้กรอกกลุ่มวิชาชีพ) เช็กคำเฉพาะก่อนคำกว้าง
+PROFESSION_RULES = [
+    ("ทันตแพทย์", ["ทันตแพทย์"]),
+    ("สหวิชาชีพ", ["แพทย์แผนไทย", "นักเทคนิคการแพทย์", "นักรังสี", "นักกายภาพ", "นักกิจกรรมบำบัด", "นักโภชนาการ",
+                   "นักจิตวิทยา", "นักเวชศาสตร์", "นักวิทยาศาสตร์การแพทย์", "นักแก้ไขความผิดปกติ"]),
+    ("แพทย์", ["แพทย์"]),
+    ("เภสัชกร", ["เภสัชกร"]),
+    ("พยาบาลวิชาชีพ", ["พยาบาลวิชาชีพ"]),
+    ("พยาบาลเทคนิค/ผู้ช่วยพยาบาล", ["พยาบาลเทคนิค", "ผู้ช่วยพยาบาล"]),
+]
+
+
+def guess_profession(position):
+    text = re.sub(r"\s+", "", position or "")
+    if not text:
+        return None
+    # เจ้าพนักงานสายสาธารณสุข (จพ.เภสัชกรรม, จพ.ทันตสาธารณสุข ฯลฯ) เช็กก่อน "แพทย์"/"เภสัชกร"
+    # ส่วนเจ้าพนักงานธุรการ/การเงิน/พัสดุ เป็นสายสนับสนุน
+    if re.search(r"(จพ\.?|จพง\.?|เจ้าพนักงาน)(ทันต|เภสัช|สาธารณสุข|วิทยาศาสตร์|รังสี|เวช)", text) \
+            or re.search(r"(นักวิชาการ|นวก\.?)สาธารณสุข", text):
+        return "เจ้าพนักงาน/นักวิชาการสาธารณสุข"
+    for group, words in PROFESSION_RULES:
+        if any(w in text for w in words):
+            return group
+    return "สายสนับสนุน"
+
+
 def staff_rows(conn):
     result = []
     for r in conn.execute("SELECT * FROM users WHERE active = 1 ORDER BY seq IS NULL, seq, first_name"):
-        result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r),
-                       "position": r["position"], "level": r["level"]})
+        result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r), "position": r["position"],
+                       "level": r["level"], "department": r["department"],
+                       "profession_group": r["profession_group"] or guess_profession(r["position"])})
     return result
 
 
@@ -788,11 +854,340 @@ def list_staff(req):
     return staff_rows(req.conn)
 
 
+MOVE_KINDS = {"hire": "รับใหม่", "transfer_in": "รับย้ายเข้า", "resign": "ลาออก", "transfer_out": "ย้ายออก"}
+MOVE_IN = ("hire", "transfer_in")
+MOVE_OUT = ("resign", "transfer_out")
+GROUP_BY = {"profession_group": "กลุ่มวิชาชีพ", "department": "กลุ่มงาน"}
+
+
+def to_kind(text):
+    """แปลงคำในไฟล์เป็นประเภทการเข้า-ออก"""
+    t = re.sub(r"\s+", "", str(text or ""))
+    if t in MOVE_KINDS:
+        return t
+    if "ย้ายเข้า" in t or "รับย้าย" in t:
+        return "transfer_in"
+    if "ย้ายออก" in t or t == "ย้าย":
+        return "transfer_out"
+    if "ลาออก" in t or "เกษียณ" in t:
+        return "resign"
+    if any(w in t for w in ("รับใหม่", "บรรจุ", "รับเข้า", "แต่งตั้ง", "จ้างใหม่")):
+        return "hire"
+    return None
+
+
+TH_MONTHS = {
+    "มค": 1, "มกราคม": 1, "กพ": 2, "กุมภาพันธ์": 2, "มีค": 3, "มีนาคม": 3, "เมย": 4, "เมษายน": 4,
+    "พค": 5, "พฤษภาคม": 5, "มิย": 6, "มิถุนายน": 6, "กค": 7, "กรกฎาคม": 7, "สค": 8, "สิงหาคม": 8,
+    "กย": 9, "กันยายน": 9, "ตค": 10, "ตุลาคม": 10, "พย": 11, "พฤศจิกายน": 11, "ธค": 12, "ธันวาคม": 12,
+}
+
+
+def full_year(y):
+    """ปีจากไฟล์: 2 หลักถือเป็น พ.ศ. (65 = 2565), มากกว่า 2400 เป็น พ.ศ., นอกนั้นเป็น ค.ศ."""
+    y = int(y)
+    if y < 100:
+        y += 2500
+    return y - 543 if y > 2400 else y
+
+
+def parse_any_date(value):
+    """วันที่จาก Excel: เลขวันที่ของ Excel, 2026-10-01, 1/4/2550, 1/12/2020, 1 มิย 65, 1 มิ.ย. 2565"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text[:10]):
+            return date.fromisoformat(text[:10])
+        number = parse_number(text)
+        if number is not None and 10000 < number < 80000:
+            return date(1899, 12, 30) + timedelta(days=int(number))
+        m = re.fullmatch(r"(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2,4})", text)
+        if m:
+            return date(full_year(m.group(3)), int(m.group(2)), int(m.group(1)))
+        m = re.fullmatch(r"(\d{1,2})\s*([ก-๙.\s]+?)\s*(\d{2,4})", text)
+        if m:
+            month = TH_MONTHS.get(re.sub(r"[.\s]", "", m.group(2)))
+            if month:
+                return date(full_year(m.group(3)), month, int(m.group(1)))
+    except ValueError:
+        return None
+    return None
+
+
+NAME_PREFIXES = ["นางสาว", "น.ส.", "นส.", "นาง", "นาย", "ว่าที่ร.ต.", "ว่าที่ ร.ต.", "ดร.", "นพ.", "พญ.", "ทพ.", "ทพญ.",
+                 "ภก.", "ภญ."]
+
+
+def split_name(text):
+    """แยก "นส.มานี มีสุข" เป็น (คำนำหน้า, ชื่อ, นามสกุล)"""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    prefix = None
+    for p in sorted(NAME_PREFIXES, key=len, reverse=True):
+        if text.startswith(p):
+            prefix, text = p, text[len(p):].strip()
+            break
+    parts = text.split(" ", 1)
+    return prefix, parts[0] if parts else "", parts[1] if len(parts) > 1 else ""
+
+
+def match_user(conn, first, last):
+    found = conn.execute("SELECT * FROM users WHERE first_name = ? AND last_name = ?", (first, last)).fetchall()
+    return found[0] if len(found) == 1 else None
+
+
+def record_movement(conn, values, created_by, deactivate=True):
+    """บันทึกการเข้า-ออก 1 รายการ คืน (id, ข้อความแจ้ง)
+    ถ้าเป็นการออก และชื่อตรงกับบัญชีที่ใช้งานอยู่ จะปิดบัญชีให้ (เฉพาะวันที่ไม่เกินวันนี้)"""
+    note = None
+    if values.get("user_id"):
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (values["user_id"],)).fetchone()
+        if user is None:
+            raise ApiError(400, "ไม่พบบุคลากรที่เลือก")
+    else:
+        user = match_user(conn, values["first_name"], values["last_name"])
+    if user:
+        values["user_id"] = user["id"]
+        for key in ("prefix", "position", "department", "profession_group"):
+            values[key] = values.get(key) or user[key]
+    if not values.get("profession_group") and values.get("position"):
+        values["profession_group"] = guess_profession(values["position"])
+    if user and deactivate and values["kind"] in MOVE_OUT and user["active"] and values["moved_on"] <= str(today()):
+        admins = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1").fetchone()[0]
+        if user["role"] == "admin" and admins <= 1:
+            note = f"ไม่ปิดบัญชี {full_name(user)} เพราะเป็นผู้ดูแลระบบคนสุดท้าย"
+        else:
+            conn.execute("UPDATE users SET active = 0 WHERE id = ?", (user["id"],))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+            note = f"ปิดบัญชีผู้ใช้ {full_name(user)} แล้ว"
+    values.update(created_by=created_by, created_at=now())
+    move_id = conn.execute(
+        f"INSERT INTO staff_movements ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+        list(values.values())).lastrowid
+    return move_id, note
+
+
+def movement_values(b):
+    return {
+        "kind": to_choice(b.get("kind"), "ประเภท", MOVE_KINDS),
+        "moved_on": to_date(b.get("moved_on"), "วันที่", True),
+        "prefix": to_str(b.get("prefix"), "คำนำหน้า", max_len=30),
+        "first_name": to_str(b.get("first_name"), "ชื่อ", True, 100),
+        "last_name": to_str(b.get("last_name"), "นามสกุล", True, 100),
+        "position": to_str(b.get("position"), "ตำแหน่ง", max_len=150),
+        "employment_type": to_str(b.get("employment_type"), "ประเภทการจ้าง", max_len=50),
+        "department": to_str(b.get("department"), "กลุ่มงาน", max_len=150),
+        "profession_group": to_str(b.get("profession_group"), "กลุ่มวิชาชีพ", max_len=100),
+        "note": to_str(b.get("note"), "หมายเหตุ", max_len=500),
+        "user_id": to_id(b.get("user_id"), "บุคลากร", False),
+    }
+
+
+def create_movement(req):
+    b = req.body
+    if b.get("user_id"):
+        # เลือกจากรายชื่อ: ใช้ชื่อจากบัญชีนั้น
+        user = get_user(req.conn, to_id(b.get("user_id"), "บุคลากร"))
+        b = {**b, "prefix": b.get("prefix") or user["prefix"], "first_name": user["first_name"],
+             "last_name": user["last_name"]}
+    values = movement_values(b)
+    if values["kind"] in MOVE_IN and b.get("national_id") and not values["user_id"]:
+        # รับใหม่/รับย้ายเข้าพร้อมเลขบัตร: เพิ่มเป็นผู้ใช้ให้ด้วย
+        nid = to_national_id(b.get("national_id"))
+        if req.conn.execute("SELECT 1 FROM users WHERE national_id = ?", (nid,)).fetchone():
+            raise ApiError(409, "มีเลขบัตรประชาชนนี้ในระบบแล้ว")
+        values["user_id"] = req.conn.execute(
+            """INSERT INTO users (national_id, prefix, first_name, last_name, position, department, profession_group,
+                   role, password_hash, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?, 1, ?)""",
+            (nid, values["prefix"], values["first_name"], values["last_name"], values["position"], values["department"],
+             values["profession_group"] or guess_profession(values["position"]),
+             hash_password(initial_password(nid)), now())).lastrowid
+    move_id, note = record_movement(req.conn, values, req.user["id"], to_bool(b.get("deactivate", True)))
+    return {"id": move_id, "note": note}
+
+
+def delete_movement(req, move_id):
+    if req.conn.execute("DELETE FROM staff_movements WHERE id = ?", (move_id,)).rowcount == 0:
+        raise ApiError(404, "ไม่พบรายการนี้")
+    return {"ok": True}
+
+
+def fy_range(year):
+    """ปีงบประมาณ พ.ศ. → (1 ต.ค. ปีก่อน, 30 ก.ย.)"""
+    return date(year - 544, 10, 1), date(year - 543, 9, 30)
+
+
+def list_movements(req):
+    where, params = ["1 = 1"], []
+    if req.q("year"):
+        start, end = fy_range(to_id(req.q("year"), "ปีงบประมาณ"))
+        where.append("moved_on BETWEEN ? AND ?")
+        params += [str(start), str(end)]
+    if req.q("kind"):
+        where.append("kind = ?")
+        params.append(to_choice(req.q("kind"), "ประเภท", MOVE_KINDS))
+    return rows(req.conn.execute(
+        f"""SELECT id, kind, moved_on, prefix, first_name, last_name, position, employment_type, department,
+                   profession_group, note, user_id FROM staff_movements WHERE {' AND '.join(where)}
+            ORDER BY moved_on DESC, id DESC LIMIT 2000""", params))
+
+
+MOVE_COLUMNS = [
+    ("seq", ["ลำดับ"], []),
+    ("moved_on", ["วันที่", "วันเดือนปี"], []),
+    ("employment_type", ["ประเภทการจ้าง", "การจ้าง"], []),
+    ("kind", ["ประเภท", "รายการ", "การเคลื่อนไหว"], []),
+    ("prefix", ["คำนำหน้า"], []),
+    ("full_name", ["ชื่อ-สกุล", "ชื่อสกุล", "ชื่อ-นามสกุล"], []),
+    ("last_name", ["นามสกุล"], []),
+    ("department", ["กลุ่มงาน", "หน่วยงาน"], []),
+    ("profession_group", ["กลุ่มวิชาชีพ", "วิชาชีพ"], []),
+    ("first_name", ["ชื่อ"], ["นามสกุล", "สกุล", "คำนำหน้า"]),
+    ("position", ["ตำแหน่ง"], []),
+    ("note", ["หมายเหตุ"], []),
+]
+
+
+def import_movements(req):
+    sheet = read_xlsx(decode_upload(req.body.get("file_data"), "ไฟล์ Excel"))
+    header_row, cols = map_columns(sheet, MOVE_COLUMNS, ["moved_on", "kind"])
+    if "full_name" not in cols and not ("first_name" in cols and "last_name" in cols):
+        raise ApiError(400, "ไม่พบคอลัมน์ชื่อ ต้องมี \"ชื่อ-สกุล\" หรือ \"ชื่อ\" กับ \"นามสกุล\"")
+    created, errors, warnings, notes = 0, [], [], []
+    for i, row in enumerate(sheet[header_row + 1:], start=header_row + 2):
+        def cell(key):
+            return (row[cols[key]] if key in cols and cols[key] < len(row) else "").strip()
+        if not any(x.strip() for x in row):
+            continue
+        if "full_name" in cols and cell("full_name"):
+            prefix, first, last = split_name(cell("full_name"))
+            prefix = cell("prefix") or prefix
+        else:
+            prefix, first, last = cell("prefix") or None, cell("first_name"), cell("last_name")
+        kind = to_kind(cell("kind"))
+        moved_on = parse_any_date(cell("moved_on"))
+        label = f"{first} {last}".strip() or "ไม่มีชื่อ"
+        if not first:
+            errors.append(f"แถว {i}: ไม่มีชื่อ")
+            continue
+        if not kind:
+            errors.append(f"แถว {i} ({label}): ไม่รู้จักประเภท \"{cell('kind')}\" ใช้ได้: รับใหม่, รับย้ายเข้า, ลาออก, ย้ายออก")
+            continue
+        if not moved_on:
+            errors.append(f"แถว {i} ({label}): อ่านวันที่ \"{cell('moved_on')}\" ไม่ได้")
+            continue
+        if not last:
+            warnings.append(f"แถว {i}: \"{first}\" ไม่มีนามสกุล")
+        if req.conn.execute(
+                "SELECT 1 FROM staff_movements WHERE kind = ? AND moved_on = ? AND first_name = ? AND last_name = ?",
+                (kind, str(moved_on), first, last)).fetchone():
+            warnings.append(f"แถว {i} ({label}): มี{MOVE_KINDS[kind]}วันที่ {th_date(str(moved_on))} อยู่แล้ว ข้ามแถวนี้")
+            continue
+        values = {
+            "kind": kind, "moved_on": str(moved_on), "prefix": prefix[:30] if prefix else None,
+            "first_name": first[:100], "last_name": last[:100],
+            "position": cell("position")[:150] or None, "employment_type": cell("employment_type")[:50] or None,
+            "department": cell("department")[:150] or None, "profession_group": cell("profession_group")[:100] or None,
+            "note": cell("note")[:500] or None,
+        }
+        _, note = record_movement(req.conn, values, req.user["id"])
+        if note:
+            notes.append(f"แถว {i}: {note}")
+        created += 1
+    return {"created": created, "updated": 0, "errors": errors, "warnings": warnings + notes}
+
+
+def movements_template(req):
+    return xlsx_response("แบบฟอร์มบุคลากรเข้า-ออก.xlsx", [
+        ("เข้า-ออก", [["วันที่", "ประเภท", "คำนำหน้า", "ชื่อ", "นามสกุล", "ตำแหน่ง", "ประเภทการจ้าง", "กลุ่มงาน",
+                        "กลุ่มวิชาชีพ", "หมายเหตุ"]]),
+        ("วิธีกรอก", [
+            ["คอลัมน์", "วิธีกรอก"],
+            ["วันที่", "วันที่มีผล เช่น 1/10/2569 หรือ 1 ต.ค. 69 (ปี พ.ศ. หรือ ค.ศ. ก็ได้)"],
+            ["ประเภท", "รับใหม่ / รับย้ายเข้า / ลาออก / ย้ายออก"],
+            ["ชื่อ, นามสกุล", "แยกคอลัมน์ หรือใช้คอลัมน์เดียวชื่อ \"ชื่อ-สกุล\" ก็ได้"],
+            ["กลุ่มวิชาชีพ", "ถ้าเว้นว่าง ระบบจะเดาจากตำแหน่ง"],
+            ["ลาออก / ย้ายออก", "ถ้าชื่อตรงกับผู้ใช้ในระบบ ระบบจะปิดบัญชีของคนนั้นให้"],
+        ])])
+
+
+def retention_table(conn, year, by):
+    """อัตราการคงอยู่ = (ต้นปี − ลาออก − ย้ายออก) ÷ ต้นปี × 100
+    ต้นปี = บุคลากรปัจจุบัน − ผู้เข้าตั้งแต่ต้นปีงบถึงวันนี้ + ผู้ออกตั้งแต่ต้นปีงบถึงวันนี้"""
+    start, end = fy_range(year)
+    today_s = str(today())
+    groups = {}
+
+    def grp(name):
+        name = name or UNSPECIFIED
+        return groups.setdefault(name, {"group": name, "current": 0, "after_in": 0, "after_out": 0,
+                                        **{k: 0 for k in MOVE_KINDS}})
+
+    for s in staff_rows(conn):
+        grp(s[by])["current"] += 1
+    for e in conn.execute(f"SELECT kind, moved_on, {by} AS g, position FROM staff_movements WHERE moved_on >= ?",
+                          (str(start),)):
+        name = e["g"] or (guess_profession(e["position"]) if by == "profession_group" else None)
+        row = grp(name)
+        if e["moved_on"] <= today_s:
+            row["after_in" if e["kind"] in MOVE_IN else "after_out"] += 1
+        if e["moved_on"] <= str(end):
+            row[e["kind"]] += 1
+    result = []
+    for row in groups.values():
+        row["start"] = row["current"] - row["after_in"] + row["after_out"]
+        row["left"] = row["resign"] + row["transfer_out"]
+        row["end"] = row["start"] + row["hire"] + row["transfer_in"] - row["left"]
+        row["rate"] = round((row["start"] - row["left"]) / row["start"] * 100, 2) if row["start"] > 0 else None
+        row["inconsistent"] = row["start"] < 0 or row["left"] > max(row["start"], 0)
+        if any(row[k] for k in ("start", "left", "hire", "transfer_in", "current")):
+            result.append(row)
+    result.sort(key=lambda r: (r["group"] == UNSPECIFIED, -r["start"], r["group"]))
+    total = {k: sum(r[k] for r in result) for k in ("start", "hire", "transfer_in", "resign", "transfer_out", "left", "end")}
+    total["group"] = "รวมทั้งโรงพยาบาล"
+    total["rate"] = round((total["start"] - total["left"]) / total["start"] * 100, 2) if total["start"] > 0 else None
+    total["inconsistent"] = any(r["inconsistent"] for r in result)
+    return {"fiscal_year": year, "by": by, "start_date": str(start), "end_date": str(min(end, today())),
+            "groups": result, "total": total}
+
+
+def retention(req):
+    by = to_choice(req.q("by") or "profession_group", "การแบ่งกลุ่ม", GROUP_BY)
+    year = year_param(req)
+    result = retention_table(req.conn, year, by)
+    years = {fiscal_year(date.fromisoformat(r[0])) for r in req.conn.execute("SELECT DISTINCT moved_on FROM staff_movements")}
+    years.add(fiscal_year(today()))
+    result["years"] = sorted(years, reverse=True)
+    result["trend"] = [{"fiscal_year": y, "rate": retention_table(req.conn, y, by)["total"]["rate"]}
+                       for y in sorted(years)[-6:]]
+    return result
+
+
+def retention_sheet(conn, year, by):
+    t = retention_table(conn, year, by)
+    out = [[GROUP_BY[by], "ต้นปีงบ", "รับใหม่", "รับย้ายเข้า", "ลาออก", "ย้ายออก", "ปลายปีงบ", "อัตราการคงอยู่ (%)"]]
+    for r in t["groups"] + [t["total"]]:
+        out.append([r["group"], r["start"], r["hire"], r["transfer_in"], r["resign"], r["transfer_out"], r["end"],
+                    r["rate"] if r["rate"] is not None else "-"])
+    return out
+
+
 def export_staff(req):
-    rows_ = [["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ"]] + [
-        [s["seq"] if s["seq"] is not None else "", s["full_name"], s["position"] or "", s["level"] or ""]
+    year = year_param(req)
+    staff = [["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ", "กลุ่มงาน", "กลุ่มวิชาชีพ"]] + [
+        [s["seq"] if s["seq"] is not None else "", s["full_name"], s["position"] or "", s["level"] or "",
+         s["department"] or "", s["profession_group"] or ""]
         for s in staff_rows(req.conn)]
-    return xlsx_response("ข้อมูลบุคลากร.xlsx", [("ข้อมูลบุคลากร", rows_)])
+    moves = [["วันที่", "ประเภท", "ชื่อ-นามสกุล", "ตำแหน่ง", "กลุ่มงาน", "กลุ่มวิชาชีพ", "หมายเหตุ"]] + [
+        [th_date(m["moved_on"]), MOVE_KINDS[m["kind"]], f"{m['prefix'] or ''}{m['first_name']} {m['last_name']}",
+         m["position"] or "", m["department"] or "", m["profession_group"] or "", m["note"] or ""]
+        for m in req.conn.execute("SELECT * FROM staff_movements WHERE moved_on BETWEEN ? AND ? ORDER BY moved_on",
+                                  [str(d) for d in fy_range(year)])]
+    return xlsx_response(f"ข้อมูลบุคลากร ปีงบ {year}.xlsx", [
+        ("ข้อมูลบุคลากร", staff),
+        ("คงอยู่ตามกลุ่มวิชาชีพ", retention_sheet(req.conn, year, "profession_group")),
+        ("คงอยู่ตามกลุ่มงาน", retention_sheet(req.conn, year, "department")),
+        (f"เข้า-ออก ปีงบ {year}", moves)])
 
 
 # ---------- แผนพัฒนาบุคลากร ----------
@@ -1266,7 +1661,13 @@ route("GET", "/meta", meta, "self")
 route("GET", "/dashboard", dashboard)
 route("GET", "/export/dashboard.xlsx", export_dashboard)
 route("GET", "/staff", list_staff)
+route("GET", "/staff/retention", retention)
 route("GET", "/export/staff.xlsx", export_staff, "admin")
+route("GET", "/movements", list_movements, "admin")
+route("POST", "/movements", create_movement, "admin")
+route("POST", "/movements/import", import_movements, "admin")
+route("POST", f"/movements/{ID}/delete", delete_movement, "admin")
+route("GET", "/templates/movements.xlsx", movements_template, "admin")
 route("GET", "/users", list_users, "admin")
 route("POST", "/users", create_user, "admin")
 route("POST", "/users/import", import_users, "admin")
@@ -1293,7 +1694,7 @@ route("GET", f"/clinic/{ID}", get_clinic)
 route("POST", f"/clinic/{ID}/reply", reply_clinic)
 route("POST", f"/clinic/{ID}/close", close_clinic)
 
-UPLOAD_PATHS = re.compile(r"^/api/(documents(/\d+)?|users/import|plans/import)$")
+UPLOAD_PATHS = re.compile(r"^/api/(documents(/\d+)?|users/import|plans/import|movements/import)$")
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
