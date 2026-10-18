@@ -952,7 +952,13 @@ def record_movement(conn, values, created_by, deactivate=True):
             values[key] = values.get(key) or user[key]
     if not values.get("profession_group") and values.get("position"):
         values["profession_group"] = guess_profession(values["position"])
-    if user and deactivate and values["kind"] in MOVE_OUT and user["active"] and values["moved_on"] <= str(today()):
+    leaving = user and values["kind"] in MOVE_OUT and user["active"] and values["moved_on"] <= str(today())
+    # ข้อมูลย้อนหลังเก่ากว่าปีงบที่แล้ว: คนชื่อเดียวกันที่ยังใช้งานอยู่อาจถูกรับกลับเข้ามาใหม่ จึงไม่ปิดบัญชีให้อัตโนมัติ
+    recent = values["moved_on"] >= str(fy_range(fiscal_year(today()) - 1)[0])
+    if leaving and deactivate and not recent:
+        note = (f"{full_name(user)} ยังใช้งานอยู่ แต่มีรายการ{MOVE_KINDS[values['kind']]}เมื่อ {th_date(values['moved_on'])}"
+                " ไม่ได้ปิดบัญชีให้ (อาจเป็นการรับกลับเข้ามาใหม่) กรุณาตรวจสอบ")
+    elif leaving and deactivate:
         admins = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1").fetchone()[0]
         if user["role"] == "admin" and admins <= 1:
             note = f"ไม่ปิดบัญชี {full_name(user)} เพราะเป็นผู้ดูแลระบบคนสุดท้าย"
