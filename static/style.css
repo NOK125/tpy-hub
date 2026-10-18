@@ -183,6 +183,19 @@ td .btn { vertical-align: middle; }
   padding: .55rem 1rem; border-radius: 9px; white-space: nowrap; }
 .subtabs button:hover { color: var(--text); background: var(--bg); }
 .subtabs button[aria-selected="true"] { background: var(--primary); color: var(--primary-text); font-weight: 600; }
+.section-title { margin: .4rem 0 .8rem; }
+.stat small.sub { display: block; font-size: .8rem; color: var(--muted); margin-top: .15rem; }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; font-size: .85rem; color: var(--muted); margin-bottom: .6rem; }
+.legend span::before { content: ""; display: inline-block; width: .75rem; height: .75rem; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
+.legend .in::before, .month-chart i.in { background: var(--ok); }
+.legend .out::before, .month-chart i.out { background: var(--bad); }
+.month-chart { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: .25rem; align-items: end; }
+.mc { display: grid; gap: .25rem; text-align: center; min-width: 0; }
+.mc small { font-size: .68rem; white-space: nowrap; overflow: hidden; }
+.mc-bars { height: 130px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; border-bottom: 1px solid var(--border); }
+.mc-bars i { position: relative; display: block; width: 42%; max-width: 14px; min-height: 0; border-radius: 3px 3px 0 0;
+  print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+.mc-bars i b { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); font-size: .68rem; font-weight: 600; color: var(--text); }
 .chips { display: flex; flex-wrap: wrap; gap: .45rem; }
 .chip { font: inherit; cursor: pointer; padding: .35rem .8rem; border-radius: 99px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 .chip b { margin-left: .25rem; color: var(--primary); }

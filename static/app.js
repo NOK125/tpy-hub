@@ -231,6 +231,7 @@ async function dashboardView() {
       ${stat(num(d.clinic.open), isAdmin() ? "HR Clinic รอตอบ" : "คำถามของฉันที่รอตอบ", "clinic", isAdmin() && d.clinic.open > 0)}
       ${stat(num(docsTotal), "เอกสารทั้งหมด", "")}
     </div>
+    ${workforceHtml(d.workforce, d.fiscal_year)}
     <div class="grid2">
       <section class="card"><h2>งบแผนพัฒนาบุคลากรตามหน่วยงาน</h2>
         ${d.plans.length ? `<div class="meter-list">${d.plans.map((p) => `<div class="meter">
@@ -257,7 +258,55 @@ async function dashboardView() {
       </section>
     </div>`;
   $("#year").onchange = (e) => { currentYear = e.target.value; refresh(); };
-  bind({ go: (tab) => tab && show(tab), pdf: () => window.print() });
+  bind({
+    go: (tab) => tab && show(tab),
+    pdf: () => window.print(),
+    retention: () => { staffTab = "retention"; try { sessionStorage.setItem("staff-tab", "retention"); } catch {} show("staff"); },
+  });
+}
+
+// อัตราการคงอยู่และการเข้า-ออกในหน้า Dashboard
+function workforceHtml(w, year) {
+  const pctText = (v) => (v == null ? "-" : `${num(v)}%`);
+  const tile = (value, label, sub = "", cls = "") =>
+    `<button class="stat" data-act="retention"><b class="${cls}">${value}</b><span>${label}</span>${sub ? `<small class="sub">${sub}</small>` : ""}</button>`;
+  if (!w.has_data) {
+    return `<section class="card"><h2>อัตราการคงอยู่และการเข้า-ออก</h2>
+      <p class="empty">ยังไม่มีประวัติบุคลากรเข้า-ออก ${isAdmin() ? `นำเข้าได้ที่ <button class="btn small" data-act="retention">ข้อมูลบุคลากร</button> → แท็บประวัติเข้า-ออก` : ""}</p></section>`;
+  }
+  const maxMonth = Math.max(1, ...w.months.map((m) => Math.max(m.hire + m.transfer_in, m.resign + m.transfer_out)));
+  const monthShort = ["มค", "กพ", "มีค", "เมย", "พค", "มิย", "กค", "สค", "กย", "ตค", "พย", "ธค"];
+  return `
+    <h2 class="section-title">อัตราการคงอยู่และการเข้า-ออก ปีงบ ${year}</h2>
+    <div class="stats">
+      ${tile(pctText(w.retention_rate), "อัตราการคงอยู่ (Retention rate)", `ต้นปีงบ ${num(w.start)} คน`, rateClass(w.retention_rate))}
+      ${tile(pctText(w.turnover_rate), "อัตราการออก (Turnover rate)", `ลาออก ${num(w.resign)} · ย้ายออก ${num(w.transfer_out)}`, w.turnover_rate > 10 ? "minus" : "")}
+      ${tile(pctText(w.inflow_rate), "อัตราการรับเข้า", `รับใหม่ ${num(w.hire)} · รับย้ายเข้า ${num(w.transfer_in)}`)}
+      ${tile(num(w.end), "บุคลากรปลายปีงบ (คน)", `เปลี่ยนไป ${w.end - w.start >= 0 ? "+" : ""}${num(w.end - w.start)} คน`)}
+    </div>
+    ${w.inconsistent ? `<p class="hint">บางกลุ่มตัวเลขไม่สอดคล้อง (เช่น คนออกมากกว่าคนต้นปี) มักเกิดจากรายชื่อปัจจุบันหรือประวัติเข้า-ออกยังไม่ครบ</p>` : ""}
+    <div class="grid2">
+      <section class="card"><h2>อัตราการคงอยู่ตามกลุ่มวิชาชีพ</h2>
+        <div class="meter-list">${w.groups.filter((g) => g.start > 0).map((g) => `<div class="meter">
+          <div class="meter-label"><span>${esc(g.group)}</span><small class="${rateClass(g.rate)}">${pctText(g.rate)} · ออก ${num(g.left)}/${num(g.start)} คน</small></div>
+          ${bar(g.rate ?? 0, 100, g.rate != null && g.rate < 80 ? "over" : "")}</div>`).join("") || `<p class="empty">ยังไม่มีข้อมูล</p>`}</div>
+      </section>
+      <section class="card"><h2>บุคลากรเข้า-ออกรายเดือน</h2>
+        <div class="legend"><span class="in">เข้า (รับใหม่ + ย้ายเข้า)</span><span class="out">ออก (ลาออก + ย้ายออก)</span></div>
+        <div class="month-chart">${w.months.map((m) => {
+          const inn = m.hire + m.transfer_in, out = m.resign + m.transfer_out;
+          const title = `${monthShort[Number(m.month.slice(5)) - 1]} ${Number(m.month.slice(0, 4)) + 543}: เข้า ${inn} ออก ${out}`;
+          return `<div class="mc" title="${esc(title)}">
+            <div class="mc-bars"><i class="in" style="height:${(inn / maxMonth) * 100}%">${inn ? `<b>${inn}</b>` : ""}</i><i class="out" style="height:${(out / maxMonth) * 100}%">${out ? `<b>${out}</b>` : ""}</i></div>
+            <small>${monthShort[Number(m.month.slice(5)) - 1]}</small></div>`;
+        }).join("")}</div>
+      </section>
+      <section class="card"><h2>แนวโน้มอัตราการคงอยู่</h2>
+        <div class="meter-list">${w.trend.map((t) => `<div class="meter">
+          <div class="meter-label"><span>ปีงบประมาณ ${t.fiscal_year}</span><small class="${rateClass(t.rate)}">${pctText(t.rate)}</small></div>
+          ${bar(t.rate ?? 0, 100, t.rate != null && t.rate < 80 ? "over" : "")}</div>`).join("")}</div>
+      </section>
+    </div>`;
 }
 
 // ---------- แผนพัฒนาบุคลากร ----------

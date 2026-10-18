@@ -1589,7 +1589,8 @@ def dashboard_data(conn, user, year):
     latest_docs = [doc_row(r) for r in conn.execute(DOC_SELECT + " ORDER BY d.created_at DESC LIMIT 6")]
     return {
         "fiscal_year": year,
-        "years": plan_years(conn),
+        "years": sorted(set(plan_years(conn)) | {fiscal_year(date.fromisoformat(r[0])) for r in conn.execute(
+            "SELECT DISTINCT moved_on FROM staff_movements")}, reverse=True),
         "generated_at": now(),
         "staff_total": staff["total"],
         "staff_not_activated": staff["not_activated"] or 0,
@@ -1603,6 +1604,40 @@ def dashboard_data(conn, user, year):
         "clinic": {k: clinic.get(k, 0) for k in CLINIC_STATUS},
         "latest_documents": latest_docs,
         "recent_expenses": timeline_events(conn, year)[:6],
+        "workforce": workforce_summary(conn, year),
+    }
+
+
+def workforce_summary(conn, year):
+    """อัตราการคงอยู่ อัตราการออก/รับเข้า เข้า-ออกรายเดือน และแนวโน้ม สำหรับ Dashboard"""
+    t = retention_table(conn, year, "profession_group")
+    total = t["total"]
+    pct_of_start = lambda n: round(n / total["start"] * 100, 2) if total["start"] > 0 else None
+    start, end = fy_range(year)
+    months = []
+    for i in range(12):
+        y, m = start.year + (start.month - 1 + i) // 12, (start.month - 1 + i) % 12 + 1
+        months.append({"month": f"{y:04d}-{m:02d}", **{k: 0 for k in MOVE_KINDS}})
+    index = {mo["month"]: mo for mo in months}
+    for e in conn.execute("SELECT kind, moved_on FROM staff_movements WHERE moved_on BETWEEN ? AND ?",
+                          (str(start), str(end))):
+        index[e["moved_on"][:7]][e["kind"]] += 1
+    years = {fiscal_year(date.fromisoformat(r[0])) for r in conn.execute("SELECT DISTINCT moved_on FROM staff_movements")}
+    trend_years = sorted(y for y in years | {year} if y <= year)[-5:]
+    return {
+        "has_data": bool(years),
+        "start": total["start"], "end": total["end"],
+        "hire": total["hire"], "transfer_in": total["transfer_in"],
+        "resign": total["resign"], "transfer_out": total["transfer_out"],
+        "retention_rate": total["rate"],
+        "turnover_rate": pct_of_start(total["left"]),
+        "inflow_rate": pct_of_start(total["hire"] + total["transfer_in"]),
+        "inconsistent": total["inconsistent"],
+        "groups": [{k: g[k] for k in ("group", "start", "left", "hire", "transfer_in", "rate", "inconsistent")}
+                   for g in t["groups"]],
+        "months": months,
+        "trend": [{"fiscal_year": y, "rate": t["total"]["rate"] if y == year else
+                   retention_table(conn, y, "profession_group")["total"]["rate"]} for y in trend_years],
     }
 
 
@@ -1632,6 +1667,19 @@ def export_dashboard(req):
         *[[f"เอกสาร: {DOC_CATEGORIES[k]} (ฉบับ)", v] for k, v in d["documents"].items()],
         *[[f"HR Clinic: {CLINIC_STATUS[k]} (เรื่อง)", v] for k, v in d["clinic"].items()],
     ]
+    w = d["workforce"]
+    dash = lambda v: v if v is not None else "-"
+    summary += [
+        ["บุคลากรต้นปีงบ (คน)", w["start"]],
+        ["รับใหม่ (คน)", w["hire"]], ["รับย้ายเข้า (คน)", w["transfer_in"]],
+        ["ลาออก (คน)", w["resign"]], ["ย้ายออก (คน)", w["transfer_out"]],
+        ["อัตราการคงอยู่ (%)", dash(w["retention_rate"])],
+        ["อัตราการออก (%)", dash(w["turnover_rate"])],
+        ["อัตราการรับเข้า (%)", dash(w["inflow_rate"])],
+    ]
+    monthly = [["เดือน", "รับใหม่", "รับย้ายเข้า", "ลาออก", "ย้ายออก"]] + [
+        [f"{TH_MONTH_NAMES[int(m['month'][5:]) - 1]} {int(m['month'][:4]) + 543}",
+         m["hire"], m["transfer_in"], m["resign"], m["transfer_out"]] for m in w["months"]]
     plans = [["ลำดับ", "หน่วยงาน", "งบประมาณ", "ใช้ไป", "คงเหลือ", "ใช้ไป (%)"]] + [
         [p["seq"], p["department"], p["budget"], p["spent"], p["remaining"], pct(p["spent"], p["budget"])]
         for p in d["plans"]]
@@ -1642,7 +1690,13 @@ def export_dashboard(req):
     positions = [["ตำแหน่ง", "จำนวน (คน)"]] + [[r["label"], r["n"]] for r in d["by_position"]]
     return xlsx_response(f"สรุปภาพรวม HR ปีงบ {d['fiscal_year']}.xlsx", [
         ("สรุป", summary), ("แผนพัฒนาบุคลากร", plans), ("ประวัติการตัดงบ", timeline),
-        ("บุคลากรตามระดับ", levels), ("บุคลากรตามตำแหน่ง", positions)])
+        ("บุคลากรตามระดับ", levels), ("บุคลากรตามตำแหน่ง", positions),
+        ("อัตราการคงอยู่", retention_sheet(req.conn, d["fiscal_year"], "profession_group")),
+        ("เข้า-ออกรายเดือน", monthly)])
+
+
+TH_MONTH_NAMES = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม",
+                  "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
 
 
 # ---------- เส้นทาง API ----------
