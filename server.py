@@ -774,6 +774,27 @@ def users_template(req):
                          [("ผู้ใช้", [["ลำดับ", "คำนำหน้า", "ชื่อ", "นามสกุล", "หมายเลขบัตร", "ตำแหน่ง", "ระดับ"]])])
 
 
+# ---------- ข้อมูลบุคลากร (ทุกคนดูได้ ไม่มีเลขบัตรประชาชน) ----------
+
+def staff_rows(conn):
+    result = []
+    for r in conn.execute("SELECT * FROM users WHERE active = 1 ORDER BY seq IS NULL, seq, first_name"):
+        result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r),
+                       "position": r["position"], "level": r["level"]})
+    return result
+
+
+def list_staff(req):
+    return staff_rows(req.conn)
+
+
+def export_staff(req):
+    rows_ = [["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ"]] + [
+        [s["seq"] if s["seq"] is not None else "", s["full_name"], s["position"] or "", s["level"] or ""]
+        for s in staff_rows(req.conn)]
+    return xlsx_response("ข้อมูลบุคลากร.xlsx", [("ข้อมูลบุคลากร", rows_)])
+
+
 # ---------- แผนพัฒนาบุคลากร ----------
 
 PLAN_SELECT = """
@@ -1244,6 +1265,8 @@ route("POST", "/me/password", change_password, "self")
 route("GET", "/meta", meta, "self")
 route("GET", "/dashboard", dashboard)
 route("GET", "/export/dashboard.xlsx", export_dashboard)
+route("GET", "/staff", list_staff)
+route("GET", "/export/staff.xlsx", export_staff, "admin")
 route("GET", "/users", list_users, "admin")
 route("POST", "/users", create_user, "admin")
 route("POST", "/users/import", import_users, "admin")

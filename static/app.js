@@ -224,7 +224,7 @@ async function dashboardView() {
       <button class="btn" data-act="pdf">ดาวน์โหลด PDF</button>
     </div>
     <div class="stats">
-      ${stat(num(d.staff_total), `บุคลากร (คน)${isAdmin() && d.staff_not_activated ? ` · ยังไม่เปลี่ยนรหัส ${num(d.staff_not_activated)}` : ""}`, isAdmin() ? "users" : "")}
+      ${stat(num(d.staff_total), `บุคลากร (คน)${isAdmin() && d.staff_not_activated ? ` · ยังไม่เปลี่ยนรหัส ${num(d.staff_not_activated)}` : ""}`, "staff")}
       ${stat(money(d.total_budget), "งบแผนพัฒนาบุคลากร (บาท)", "plans")}
       ${stat(`${money(d.total_spent)} <small>(${pct(d.total_spent, d.total_budget)}%)</small>`, "ใช้ไปแล้ว (บาท)", "plans")}
       ${stat(money(d.total_remaining), "คงเหลือ (บาท)", "plans", d.total_budget > 0 && d.total_remaining < 0)}
@@ -510,6 +510,62 @@ async function clinicView() {
   });
 }
 
+// ---------- ข้อมูลบุคลากร (ทุกคนดูได้) ----------
+
+async function staffView() {
+  const staff = await api("GET", "/staff");
+  const count = (key) => {
+    const m = new Map();
+    for (const s of staff) { const k = s[key] || "ไม่ระบุ"; m.set(k, (m.get(k) || 0) + 1); }
+    return [...m].sort((a, b) => b[1] - a[1]);
+  };
+  const levels = count("level");
+  const positions = count("position");
+  const filter = { q: "", level: "", position: "" };
+  view.innerHTML = `
+    <div class="toolbar"><h2>ข้อมูลบุคลากร <small>(${num(staff.length)} คน)</small></h2>
+      ${isAdmin() ? `<a class="btn" href="/api/export/staff.xlsx">ดาวน์โหลด Excel</a>` : ""}
+    </div>
+    <div class="stats">
+      <div class="stat"><b>${num(staff.length)}</b><span>บุคลากรทั้งหมด (คน)</span></div>
+      <div class="stat"><b>${num(positions.length)}</b><span>ตำแหน่ง</span></div>
+      <div class="stat"><b>${num(levels.length)}</b><span>ระดับ</span></div>
+    </div>
+    <section class="card"><h2>จำนวนตามระดับ <small>กดเพื่อกรอง</small></h2>
+      <div class="chips" id="level-chips">${levels.map(([k, n]) =>
+        `<button type="button" class="chip" data-act="level" data-id="${esc(k)}">${esc(k)} <b>${num(n)}</b></button>`).join("")}</div>
+    </section>
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="ค้นหาชื่อ ตำแหน่ง ระดับ">
+      <select id="pos">${option("", "ทุกตำแหน่ง")}${positions.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>
+      <select id="lv">${option("", "ทุกระดับ")}${levels.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>
+    </div>
+    <section class="list" id="list"></section>`;
+  const draw = () => {
+    const q = filter.q.toLowerCase();
+    const shown = staff.filter((s) =>
+      (!q || `${s.full_name} ${s.position || ""} ${s.level || ""}`.toLowerCase().includes(q))
+      && (!filter.level || (s.level || "ไม่ระบุ") === filter.level)
+      && (!filter.position || (s.position || "ไม่ระบุ") === filter.position));
+    $$("#level-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.id === filter.level));
+    $("#list").innerHTML = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(staff.length)} คน</p>` +
+      table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ"], shown.map((s) =>
+        [esc(s.seq ?? "-"), esc(s.full_name), esc(s.position || "-"), esc(s.level || "-")]),
+      staff.length ? "ไม่พบบุคลากรที่ค้นหา" : "ยังไม่มีข้อมูลบุคลากร");
+  };
+  $("#q").oninput = (e) => { filter.q = e.target.value.trim(); draw(); };
+  $("#pos").onchange = (e) => { filter.position = e.target.value; draw(); };
+  $("#lv").onchange = (e) => { filter.level = e.target.value; draw(); };
+  bind({
+    level: (k) => {
+      filter.level = filter.level === k ? "" : k;
+      $("#lv").value = filter.level;
+      draw();
+    },
+  });
+  draw();
+}
+
 // ---------- ผู้ใช้งาน (ผู้ดูแลระบบ) ----------
 
 function userForm(user) {
@@ -708,6 +764,7 @@ function forceChangeScreen(oldPassword) {
 const icon = (d) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 const ICONS = {
   dashboard: icon('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
+  staff: icon('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="11" r="2.5"/><path d="M5.5 17c.5-1.8 1.9-2.8 3.5-2.8s3 1 3.5 2.8M15 10h3M15 14h3"/>'),
   plans: icon('<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>'),
   doc: icon('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>'),
   order: icon('<path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1z"/><path d="M16 5h2a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2"/><path d="M9 12l2 2 4-4"/>'),
@@ -723,6 +780,7 @@ const ICONS = {
 
 const VIEWS = {
   dashboard: ["Dashboard", dashboardView, null, "dashboard"],
+  staff: ["ข้อมูลบุคลากร", staffView, null, "staff"],
   plans: ["แผนพัฒนาบุคลากร", plansView, null, "plans"],
   "doc-order": ["คำสั่ง", documentsView("order"), null, "order"],
   "doc-health": ["ตรวจสุขภาพประจำปี", documentsView("health"), null, "health"],
