@@ -87,6 +87,7 @@ function fieldHtml(f, values = {}) {
     f.autocomplete ? `autocomplete="${f.autocomplete}"` : "",
     f.accept ? `accept="${f.accept}"` : "",
     f.inputmode ? `inputmode="${f.inputmode}"` : "",
+    f.multiple ? "multiple" : "",
     f.pattern ? `pattern="${f.pattern}"` : "",
     f.maxlength ? `maxlength="${f.maxlength}"` : "",
   ].join(" ");
@@ -159,7 +160,10 @@ const cell = (label, value) => `<div><small>${label}</small><div>${value}</div><
 
 // อ่านไฟล์จาก <input type=file> เป็น base64 ส่งไปกับ JSON
 function readFile(input, exts, label) {
-  const file = input?.files?.[0];
+  return readOneFile(input?.files?.[0], exts, label);
+}
+
+function readOneFile(file, exts, label) {
   if (!file) return Promise.resolve(null);
   if (!exts.some((x) => file.name.toLowerCase().endsWith(x))) return Promise.reject(new Error(`${label}ต้องเป็นไฟล์ ${exts.join(", ")}`));
   if (file.size > 15 * 1024 * 1024) return Promise.reject(new Error(`${label}ต้องไม่เกิน 15 MB`));
@@ -471,6 +475,59 @@ function documentForm(category, doc, defaults = {}) {
   }
 }
 
+// อัปโหลดหลายไฟล์พร้อมกัน: เลือกปีงบแล้วเลือกไฟล์ ชื่อเรื่องใช้ชื่อไฟล์ (แก้ทีหลังได้ด้วยปุ่มแก้ไข)
+function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
+  const isOrder = category === "order";
+  const yearOptions = [...new Set([META.fiscal_year + 1, ...years, ...Array.from({ length: 10 }, (_, i) => META.fiscal_year - i)])]
+    .sort((a, b) => b - a).map((y) => [y, `ปีงบประมาณ ${y}`]);
+  const form = openForm({
+    title: `อัปโหลด${isOrder ? "คำสั่ง" : META.doc_categories[category]}`,
+    values: { subcategory, fiscal_year },
+    intro: `<p class="hint">เลือกปีงบประมาณ แล้วเลือกไฟล์ PDF ได้หลายไฟล์พร้อมกัน (กด Ctrl หรือลากคลุม) ชื่อเรื่องจะใช้ชื่อไฟล์ เพิ่มเลขที่หรือรายละเอียดภายหลังได้ด้วยปุ่ม "แก้ไข"</p>`,
+    fields: [
+      ...(isOrder ? [{ name: "subcategory", label: "ประเภทคำสั่ง", type: "select", required: true, options: Object.entries(META.order_types) }] : []),
+      { name: "fiscal_year", label: "ปีงบประมาณ", type: "select", required: true, options: yearOptions },
+      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย (ถ้ามี)", placeholder: "เช่น กลุ่มการพยาบาล" }] : []),
+      { name: "files", label: "ไฟล์ PDF (เลือกได้หลายไฟล์)", type: "file", required: true, multiple: true, accept: "application/pdf,.pdf",
+        hint: "ไฟล์ละไม่เกิน 15 MB" },
+    ],
+    extra: `<p class="upload-status muted" hidden></p>`,
+    submitLabel: "อัปโหลด",
+    onSubmit: async (d, f) => {
+      const files = [...$("[name=files]", f).files];
+      if (!files.length) throw new Error("กรุณาเลือกไฟล์ PDF");
+      const bad = files.filter((x) => !x.name.toLowerCase().endsWith(".pdf") || x.size > 15 * 1024 * 1024);
+      if (bad.length) throw new Error(`ไฟล์เหล่านี้ไม่ใช่ PDF หรือใหญ่เกิน 15 MB: ${bad.map((x) => x.name).join(", ")}`);
+      const status = $(".upload-status", f);
+      status.hidden = false;
+      const failed = [];
+      for (const [i, file] of files.entries()) {
+        status.textContent = `กำลังอัปโหลด ${i + 1} / ${files.length}: ${file.name}`;
+        try {
+          const data = await readOneFile(file, [".pdf"], "ไฟล์");
+          await api("POST", "/documents", { ...d, category, title: file.name.replace(/\.pdf$/i, "").trim(), ...data });
+        } catch (err) {
+          failed.push(`${file.name}: ${err.message}`);
+        }
+      }
+      refresh();
+      const done = files.length - failed.length;
+      if (failed.length) {
+        showMessage("อัปโหลดไม่สำเร็จบางไฟล์", `<p>อัปโหลดสำเร็จ ${num(done)} จาก ${num(files.length)} ไฟล์</p>
+          <ul class="msg-list bad">${failed.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
+        return true;
+      }
+      toast(`อัปโหลดแล้ว ${num(done)} ไฟล์`);
+    },
+  });
+  const sub = $("[name=subcategory]", form);
+  if (sub) {
+    const toggle = () => { $("[name=department]", form).closest(".field").hidden = sub.value !== "assignment"; };
+    sub.onchange = toggle;
+    toggle();
+  }
+}
+
 const docFilters = {};   // ค่าตัวกรองของแต่ละหน้า จำไว้ตอนสลับไปมา
 
 function documentsView(category) {
@@ -529,7 +586,7 @@ function documentsView(category) {
     const byId = (id) => all.find((d) => String(d.id) === id);
     bind({
       sub: (k) => { f.sub = k; f.department = ""; f.q = ""; try { sessionStorage.setItem("order-type", k); } catch {} refresh(); },
-      new: () => documentForm(category, null, { subcategory: f.sub, fiscal_year: f.year || META.fiscal_year }),
+      new: () => bulkUploadForm(category, { subcategory: f.sub, fiscal_year: f.year || META.fiscal_year, years }),
       edit: (id) => documentForm(category, byId(id)),
       delete: async (id) => {
         if (!confirm(`ลบเอกสาร "${byId(id).title}"? ไฟล์จะถูกลบถาวร`)) return;
