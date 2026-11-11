@@ -477,13 +477,13 @@ function documentForm(category, doc, defaults = {}) {
       ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย", placeholder: "เช่น กลุ่มการพยาบาล" },
         { name: "status", label: "สถานะ", type: "select", options: Object.entries(META.doc_status), hint: "Inactive = ยกเลิก/หมดอายุ/มีคำสั่งใหม่แทน" }] : []),
       { name: "note", label: "รายละเอียดเพิ่มเติม", type: "textarea", wide: true },
-      { name: "file", label: doc ? `ไฟล์ PDF (มีแล้ว: ${doc.file_name})` : "ไฟล์ PDF", type: "file", required: !doc,
-        accept: "application/pdf,.pdf", hint: doc ? "เลือกไฟล์ใหม่ถ้าต้องการแทนที่" : "ไม่เกิน 15 MB", wide: true },
+      { name: "file", label: doc ? `ไฟล์${fileKindsText(category)} (มีแล้ว: ${doc.file_name})` : `ไฟล์${fileKindsText(category)}`, type: "file",
+        required: !doc, accept: docExts(category).join(","), hint: doc ? "เลือกไฟล์ใหม่ถ้าต้องการแทนที่" : "ไม่เกิน 15 MB", wide: true },
     ],
     submitLabel: doc ? "บันทึก" : "อัปโหลด",
     onSubmit: async (d, f) => {
-      const file = await readFile($("[name=file]", f), [".pdf"], "ไฟล์");
-      if (!doc && !file) throw new Error("กรุณาเลือกไฟล์ PDF");
+      const file = await readFile($("[name=file]", f), docExts(category), "ไฟล์");
+      if (!doc && !file) throw new Error("กรุณาเลือกไฟล์");
       await api(doc ? "PUT" : "POST", doc ? `/documents/${doc.id}` : "/documents", { ...d, category, ...(file || {}) });
       toast(doc ? "บันทึกแล้ว" : "อัปโหลดแล้ว");
       refresh();
@@ -508,31 +508,33 @@ function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
   const form = openForm({
     title: `อัปโหลด${isOrder ? "คำสั่ง" : META.doc_categories[category]}`,
     values: { subcategory, fiscal_year, auto_number: true, number_year: thisBeYear() },
-    intro: `<p class="hint">เลือกปีงบประมาณ แล้วเลือกไฟล์ PDF ได้หลายไฟล์พร้อมกัน (กด Ctrl หรือลากคลุม) ชื่อเรื่องจะใช้ชื่อไฟล์ เพิ่มเลขที่หรือรายละเอียดภายหลังได้ด้วยปุ่ม "แก้ไข"</p>`,
+    intro: `<p class="hint">เลือกปีงบประมาณ แล้วเลือกไฟล์${fileKindsText(category)}ได้หลายไฟล์พร้อมกัน (กด Ctrl หรือลากคลุม) ชื่อเรื่องจะใช้ชื่อไฟล์ เพิ่มเลขที่หรือรายละเอียดภายหลังได้ด้วยปุ่ม "แก้ไข"</p>`,
     fields: [
       ...(isOrder ? [{ name: "subcategory", label: "ประเภทคำสั่ง", type: "select", required: true, options: Object.entries(META.order_types) }] : []),
       { name: "fiscal_year", label: "ปีงบประมาณ", type: "select", required: true, options: yearOptions },
       ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย (ถ้ามี)", placeholder: "เช่น กลุ่มการพยาบาล" },
         { name: "auto_number", label: "ตั้งเลขที่คำสั่งจากเลขหน้าชื่อไฟล์ (เช่น ไฟล์ \"171 ...\" → 171/ปี)", type: "checkbox" },
         { name: "number_year", label: "ปีของเลขที่คำสั่ง (พ.ศ.)", type: "number", min: 2500, max: 2700, step: 1 }] : []),
-      { name: "files", label: "ไฟล์ PDF (เลือกได้หลายไฟล์)", type: "file", required: true, multiple: true, accept: "application/pdf,.pdf",
+      { name: "files", label: `ไฟล์${fileKindsText(category)} (เลือกได้หลายไฟล์)`, type: "file", required: true, multiple: true,
+        accept: docExts(category).join(","),
         hint: "ไฟล์ละไม่เกิน 15 MB" },
     ],
     extra: `<p class="upload-status muted" hidden></p>`,
     submitLabel: "อัปโหลด",
     onSubmit: async (d, f) => {
       const files = [...$("[name=files]", f).files];
-      if (!files.length) throw new Error("กรุณาเลือกไฟล์ PDF");
-      const bad = files.filter((x) => !x.name.toLowerCase().endsWith(".pdf") || x.size > 15 * 1024 * 1024);
-      if (bad.length) throw new Error(`ไฟล์เหล่านี้ไม่ใช่ PDF หรือใหญ่เกิน 15 MB: ${bad.map((x) => x.name).join(", ")}`);
+      if (!files.length) throw new Error("กรุณาเลือกไฟล์");
+      const exts = docExts(category);
+      const bad = files.filter((x) => !exts.some((e) => x.name.toLowerCase().endsWith(e)) || x.size > 15 * 1024 * 1024);
+      if (bad.length) throw new Error(`ไฟล์เหล่านี้ไม่ใช่${fileKindsText(category)} หรือใหญ่เกิน 15 MB: ${bad.map((x) => x.name).join(", ")}`);
       const status = $(".upload-status", f);
       status.hidden = false;
       const failed = [];
       for (const [i, file] of files.entries()) {
         status.textContent = `กำลังอัปโหลด ${i + 1} / ${files.length}: ${file.name}`;
         try {
-          const data = await readOneFile(file, [".pdf"], "ไฟล์");
-          const title = file.name.replace(/\.pdf$/i, "").trim();
+          const data = await readOneFile(file, exts, "ไฟล์");
+          const title = file.name.replace(/\.(pdf|docx?|xlsx?)$/i, "").trim();
           const lead = title.match(/^\s*(\d{1,5})(?=\D|$)/);
           const doc_no = isOrder && d.auto_number && lead ? `${Number(lead[1])}/${d.number_year}` : "";
           await api("POST", "/documents", { ...d, category, title, doc_no, ...data });
@@ -559,6 +561,14 @@ function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
 }
 
 const docFilters = {};   // ค่าตัวกรองของแต่ละหน้า จำไว้ตอนสลับไปมา
+
+// ชนิดไฟล์ที่แต่ละหมวดรับ (เอกสารอื่น ๆ รับ PDF/Word/Excel หมวดอื่นรับ PDF)
+const docExts = (category) => META.doc_file_types?.[category] || [".pdf"];
+const FILE_KIND = { ".pdf": ["PDF", "bad"], ".doc": ["Word", "info"], ".docx": ["Word", "info"], ".xls": ["Excel", "ok"], ".xlsx": ["Excel", "ok"] };
+const extOf = (name) => (String(name).toLowerCase().match(/\.[a-z0-9]+$/) || [""])[0];
+const isPdf = (name) => extOf(name) === ".pdf";
+const fileKindBadge = (name) => { const k = FILE_KIND[extOf(name)]; return k ? badge(k[0], k[1]) : ""; };
+const fileKindsText = (category) => " " + [...new Set(docExts(category).map((e) => FILE_KIND[e][0]))].join(" / ");
 const thisBeYear = () => new Date().getFullYear() + 543;
 
 // สถานะคำสั่ง: ผู้ดูแลกดสลับ Active/Inactive ได้ที่ป้าย
@@ -589,7 +599,7 @@ function documentsView(category) {
     view.innerHTML = `
       <div class="toolbar"><h2>${esc(META.doc_categories[category])} <small>(${all.length})</small></h2>
         ${admin && isOrder ? `<button class="btn" data-act="fill">เติมเลขที่คำสั่งจากชื่อเรื่อง</button>` : ""}
-        ${admin ? `<button class="btn primary" data-act="new">+ อัปโหลด PDF</button>` : ""}
+        ${admin ? `<button class="btn primary" data-act="new">+ อัปโหลด${docExts(category).length > 1 ? "ไฟล์" : " PDF"}</button>` : ""}
       </div>
       ${isOrder ? `<div class="subtabs" role="tablist">${Object.entries(META.order_types).map(([k, label]) =>
         `<button type="button" role="tab" data-act="sub" data-id="${k}" aria-selected="${k === f.sub}">${esc(label)} <small>(${subCount(k)})</small></button>`).join("")}</div>` : ""}
@@ -616,8 +626,8 @@ function documentsView(category) {
           ...(f.year ? [] : [esc(docFy(d))]),
           ...(isAssign ? [esc(d.department || "-")] : []),
           ...(isOrder ? [statusCell(d, admin)] : []),
-          `<small>${fileSize(d.file_size)}</small>`,
-          actions(`<a class="btn small primary" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">เปิด</a>`,
+          `${fileKindBadge(d.file_name)}<br><small>${fileSize(d.file_size)}</small>`,
+          actions(isPdf(d.file_name) ? `<a class="btn small primary" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">เปิด</a>` : "",
             `<a class="btn small" href="/api/documents/${d.id}/file?download=1">ดาวน์โหลด</a>`,
             admin ? btn("edit", "แก้ไข", d.id) : "", admin ? btn("delete", "ลบ", d.id, "danger") : ""),
         ]), list.length ? "ไม่พบเอกสารที่ค้นหา" : `ยังไม่มี${title}`);

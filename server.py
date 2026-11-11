@@ -674,6 +674,7 @@ def meta(req):
         "doc_categories": DOC_CATEGORIES,
         "order_types": ORDER_TYPES,
         "doc_status": DOC_STATUS,
+        "doc_file_types": {k: list(CATEGORY_FILE_TYPES.get(k, (".pdf",))) for k in DOC_CATEGORIES},
         "clinic_status": CLINIC_STATUS,
         "move_kinds": MOVE_KINDS,
         "group_by": GROUP_BY,
@@ -1491,14 +1492,29 @@ def list_documents(req):
         " LIMIT 1000", params)]
 
 
-def save_pdf(data_b64, name):
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"   # ไฟล์ Office รุ่นเก่า (.doc .xls)
+ZIP_MAGIC = b"PK\x03\x04"                         # ไฟล์ Office รุ่นใหม่ (.docx .xlsx)
+FILE_TYPES = {
+    ".pdf": ("application/pdf", b"%PDF"),
+    ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ZIP_MAGIC),
+    ".doc": ("application/msword", OLE_MAGIC),
+    ".xlsx": (XLSX_TYPE, ZIP_MAGIC),
+    ".xls": ("application/vnd.ms-excel", OLE_MAGIC),
+}
+# หมวดเอกสารอื่น ๆ รับ PDF, Word, Excel ส่วนหมวดอื่นรับเฉพาะ PDF
+CATEGORY_FILE_TYPES = {"other": (".pdf", ".docx", ".doc", ".xlsx", ".xls")}
+
+
+def save_document_file(data_b64, name, category):
     name = to_str(name, "ชื่อไฟล์", True, 200)
-    if not name.lower().endswith(".pdf"):
-        raise ApiError(400, "แนบได้เฉพาะไฟล์ PDF")
-    data = decode_upload(data_b64, "ไฟล์ PDF")
-    if not data.startswith(b"%PDF"):
-        raise ApiError(400, "ไฟล์แนบไม่ใช่ PDF")
-    key = secrets.token_hex(16) + ".pdf"
+    allowed = CATEGORY_FILE_TYPES.get(category, (".pdf",))
+    ext = next((x for x in allowed if name.lower().endswith(x)), None)
+    if ext is None:
+        raise ApiError(400, "แนบได้เฉพาะไฟล์ " + ", ".join(x.lstrip(".").upper() for x in allowed))
+    data = decode_upload(data_b64, "ไฟล์")
+    if not data.startswith(FILE_TYPES[ext][1]):
+        raise ApiError(400, f"ไฟล์ {name} ไม่ใช่ไฟล์ {ext.lstrip('.').upper()} จริง")
+    key = secrets.token_hex(16) + ext
     (FILES_DIR / key).write_bytes(data)
     return name, key, len(data)
 
@@ -1533,7 +1549,8 @@ def get_document(req, doc_id):
 
 def create_document(req):
     values = doc_values(req.body)
-    values["file_name"], values["file_key"], values["file_size"] = save_pdf(req.body.get("file_data"), req.body.get("file_name"))
+    values["file_name"], values["file_key"], values["file_size"] = save_document_file(
+        req.body.get("file_data"), req.body.get("file_name"), values["category"])
     values.update(uploaded_by=req.user["id"], created_at=now())
     doc_id = req.conn.execute(f"INSERT INTO documents ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
                               list(values.values())).lastrowid
@@ -1546,7 +1563,8 @@ def update_document(req, doc_id):
     old_key = None
     if req.body.get("file_data"):
         old_key = req.conn.execute("SELECT file_key FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
-        values["file_name"], values["file_key"], values["file_size"] = save_pdf(req.body["file_data"], req.body.get("file_name"))
+        values["file_name"], values["file_key"], values["file_size"] = save_document_file(
+            req.body["file_data"], req.body.get("file_name"), values["category"])
     req.conn.execute(f"UPDATE documents SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
                      [*values.values(), doc_id])
     if old_key:
@@ -1625,8 +1643,11 @@ def document_file(req, doc_id):
     row = req.conn.execute("SELECT file_name, file_key FROM documents WHERE id = ?", (doc_id,)).fetchone()
     if row is None or not (FILES_DIR / row["file_key"]).is_file():
         raise ApiError(404, "ไม่พบไฟล์เอกสารนี้")
-    return FileResponse(row["file_name"], "application/pdf", path=FILES_DIR / row["file_key"],
-                        inline=req.q("download") != "1")
+    ext = Path(row["file_key"]).suffix.lower()
+    content_type = FILE_TYPES.get(ext, ("application/octet-stream",))[0]
+    # PDF เปิดดูในเบราว์เซอร์ได้ ส่วน Word/Excel ให้ดาวน์โหลดไปเปิดในโปรแกรม
+    return FileResponse(row["file_name"], content_type, path=FILES_DIR / row["file_key"],
+                        inline=ext == ".pdf" and req.q("download") != "1")
 
 
 # ---------- HR Clinic ----------
