@@ -373,3 +373,4 @@ body.auth main { max-width: 980px; display: grid; place-items: center; min-heigh
 .cell-input.changed { background: var(--warn-bg); border-color: var(--warn); }
 .live-dot { display: inline-flex; align-items: center; gap: .4rem; font-size: .85rem; color: var(--muted); }
 .live-dot::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+.nowrap { white-space: nowrap; }
