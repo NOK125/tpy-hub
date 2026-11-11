@@ -368,3 +368,4 @@ body.auth main { max-width: 980px; display: grid; place-items: center; min-heigh
 .toolbar .btn + .btn { margin-left: 0; }
 .badge-btn { border: 0; cursor: pointer; font: inherit; font-size: .8rem; font-weight: 600; }
 .badge-btn:hover { outline: 2px solid var(--primary); outline-offset: 1px; }
+.checkbox.inline { display: inline-flex; margin-left: .6rem; font-weight: 600; }

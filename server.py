@@ -855,17 +855,40 @@ def guess_profession(position):
     return "สายสนับสนุน"
 
 
-def staff_rows(conn):
+def left_staff(conn):
+    """บุคลากรที่ออกไปแล้ว: รายการเข้า-ออกล่าสุด (ที่มีผลแล้ว) เป็นลาออกหรือย้ายออก คืน {user_id: รายการนั้น}
+    จับคู่ด้วย user_id หรือชื่อ-นามสกุล (ถ้าชื่อซ้ำกันหลายคนจะไม่จับคู่)"""
+    norm = lambda first, last: re.sub(r"\s+", "", f"{first or ''}|{last or ''}")
+    by_name = {}
+    for u in conn.execute("SELECT id, first_name, last_name FROM users"):
+        by_name.setdefault(norm(u["first_name"], u["last_name"]), []).append(u["id"])
+    latest = {}
+    for m in conn.execute("SELECT id, kind, moved_on, user_id, first_name, last_name FROM staff_movements"
+                          " WHERE moved_on <= ? ORDER BY moved_on, id", (str(today()),)):
+        ids = [m["user_id"]] if m["user_id"] else by_name.get(norm(m["first_name"], m["last_name"]), [])
+        if len(ids) == 1:
+            latest[ids[0]] = m
+    return {uid: m for uid, m in latest.items() if m["kind"] in MOVE_OUT}
+
+
+def staff_rows(conn, include_left=False):
+    """บุคลากรที่คงอยู่ (บัญชีใช้งานอยู่ และยังไม่ได้ลาออก/ย้ายออก) ใช้ทั้งหน้ารายชื่อและการคำนวณอัตราการคงอยู่"""
+    left = left_staff(conn)
     result = []
     for r in conn.execute("SELECT * FROM users WHERE active = 1 ORDER BY seq IS NULL, seq, first_name"):
+        m = left.get(r["id"])
+        if m and not include_left:
+            continue
         result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r), "position": r["position"],
                        "level": r["level"], "department": r["department"],
-                       "profession_group": r["profession_group"] or guess_profession(r["position"])})
+                       "profession_group": r["profession_group"] or guess_profession(r["position"]),
+                       "left_kind": m["kind"] if m else None, "left_on": m["moved_on"] if m else None})
     return result
 
 
 def list_staff(req):
-    return staff_rows(req.conn)
+    # ผู้ดูแลขอดูคนที่ออกไปแล้วด้วยได้ เพื่อตรวจว่าจับคู่ชื่อถูกต้อง
+    return staff_rows(req.conn, include_left=req.user["role"] == "admin" and req.q("include_left") == "1")
 
 
 MOVE_KINDS = {"hire": "รับใหม่", "transfer_in": "รับย้ายเข้า", "resign": "ลาออก", "transfer_out": "ย้ายออก"}

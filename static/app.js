@@ -762,47 +762,77 @@ async function staffView() {
   });
 }
 
+let staffShowLeft = false;
+try { staffShowLeft = sessionStorage.getItem("staff-show-left") === "1"; } catch {}
+
 async function staffListTab(body) {
-  const staff = await api("GET", "/staff");
-  const levels = countBy(staff, "level");
-  const positions = countBy(staff, "position");
-  const depts = countBy(staff, "department");
+  const admin = isAdmin();
+  // ผู้ดูแลโหลดคนที่ออกไปแล้วมาด้วย (ซ่อนไว้ เปิดดูได้เพื่อตรวจ) ผู้ใช้ทั่วไปได้เฉพาะคนที่คงอยู่
+  const all = await api("GET", `/staff${admin ? "?include_left=1" : ""}`);
+  const staff = all.filter((s) => !s.left_kind);
+  const leftCount = all.length - staff.length;
+  const base = admin && staffShowLeft ? all : staff;
+  const levels = countBy(base, "level");
+  const positions = countBy(base, "position");
+  const depts = countBy(base, "department");
   const profs = countBy(staff, "profession_group");
   const filter = { q: "", level: "", position: "", department: "", profession_group: "" };
-  const select = (id, all, items) => `<select id="${id}">${option("", all)}${items.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>`;
+  const select = (id, label, items) => `<select id="${id}">${option("", label)}${items.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>`;
   body.innerHTML = `
     <div class="stats">
-      <div class="stat"><b>${num(staff.length)}</b><span>บุคลากรทั้งหมด (คน)</span></div>
+      <div class="stat"><b>${num(staff.length)}</b><span>บุคลากรที่คงอยู่ (คน)</span></div>
       <div class="stat"><b>${num(profs.length)}</b><span>กลุ่มวิชาชีพ</span></div>
-      <div class="stat"><b>${num(depts.filter(([k]) => k !== "ไม่ระบุ").length)}</b><span>กลุ่มงาน</span></div>
-      <div class="stat"><b>${num(positions.length)}</b><span>ตำแหน่ง</span></div>
+      <div class="stat"><b>${num(countBy(staff, "department").filter(([k]) => k !== "ไม่ระบุ").length)}</b><span>กลุ่มงาน</span></div>
+      <div class="stat"><b>${num(countBy(staff, "position").length)}</b><span>ตำแหน่ง</span></div>
     </div>
     <section class="card"><h2>จำนวนตามกลุ่มวิชาชีพ <small>กดเพื่อกรอง</small></h2>
       <div class="chips" id="prof-chips">${profs.map(([k, n]) =>
         `<button type="button" class="chip" data-act="prof" data-id="${esc(k)}">${esc(k)} <b>${num(n)}</b></button>`).join("")}</div>
     </section>
+    ${admin && leftCount ? `<p class="hint">ไม่แสดง ${num(leftCount)} คนที่ลาออกหรือย้ายออกแล้วตามประวัติเข้า-ออก
+      <label class="checkbox inline"><input type="checkbox" id="show-left" ${staffShowLeft ? "checked" : ""}> แสดงคนที่ออกแล้วด้วย</label>
+      <br><small>ถ้ามีคนที่ยังทำงานอยู่ถูกซ่อน (เช่น ออกแล้วกลับเข้ามาใหม่) ให้บันทึก "รับใหม่" หรือ "รับย้ายเข้า" ในแท็บประวัติเข้า-ออก</small></p>` : ""}
     <div class="toolbar">
       <input type="search" id="q" placeholder="ค้นหาชื่อ ตำแหน่ง ระดับ">
       ${select("f-dept", "ทุกกลุ่มงาน", depts)}${select("f-pos", "ทุกตำแหน่ง", positions)}${select("f-lv", "ทุกระดับ", levels)}
     </div>
     <section class="list" id="list"></section>`;
+  const leftBadge = (s) => (s.left_kind ? ` ${badge(`${META.move_kinds[s.left_kind]} ${when(s.left_on, false)}`, "muted")}` : "");
   const draw = () => {
     const q = filter.q.toLowerCase();
     const is = (s, key) => !filter[key] || (s[key] || "ไม่ระบุ") === filter[key];
-    const shown = staff.filter((s) => (!q || `${s.full_name} ${s.position || ""} ${s.level || ""}`.toLowerCase().includes(q))
+    const shown = base.filter((s) => (!q || `${s.full_name} ${s.position || ""} ${s.level || ""} ${s.department || ""}`.toLowerCase().includes(q))
       && is(s, "level") && is(s, "position") && is(s, "department") && is(s, "profession_group"));
     $$("#prof-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.id === filter.profession_group));
-    $("#list").innerHTML = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(staff.length)} คน</p>` +
-      table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ", "กลุ่มงาน", "กลุ่มวิชาชีพ"], shown.map((s) =>
-        [esc(s.seq ?? "-"), esc(s.full_name), esc(s.position || "-"), esc(s.level || "-"), esc(s.department || "-"), esc(s.profession_group || "-")]),
-      staff.length ? "ไม่พบบุคลากรที่ค้นหา" : "ยังไม่มีข้อมูลบุคลากร");
+    $("#list").innerHTML = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(base.length)} คน</p>` +
+      table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ", "กลุ่มงาน", "กลุ่มวิชาชีพ", ...(admin ? [""] : [])], shown.map((s) => [
+        esc(s.seq ?? "-"), `${esc(s.full_name)}${leftBadge(s)}`, esc(s.position || "-"), esc(s.level || "-"),
+        esc(s.department || "-"), esc(s.profession_group || "-"),
+        ...(admin ? [actions(btn("edit-staff", "แก้ไข", s.id))] : []),
+      ]), base.length ? "ไม่พบบุคลากรที่ค้นหา" : "ยังไม่มีข้อมูลบุคลากร");
   };
   $("#q").oninput = (e) => { filter.q = e.target.value.trim(); draw(); };
   $("#f-dept").onchange = (e) => { filter.department = e.target.value; draw(); };
   $("#f-pos").onchange = (e) => { filter.position = e.target.value; draw(); };
   $("#f-lv").onchange = (e) => { filter.level = e.target.value; draw(); };
+  if ($("#show-left")) $("#show-left").onchange = (e) => {
+    staffShowLeft = e.target.checked;
+    try { sessionStorage.setItem("staff-show-left", staffShowLeft ? "1" : "0"); } catch {}
+    refresh();
+  };
   draw();
-  return { prof: (k) => { filter.profession_group = filter.profession_group === k ? "" : k; draw(); } };
+  return {
+    prof: (k) => { filter.profession_group = filter.profession_group === k ? "" : k; draw(); },
+    // แก้ไขข้อมูลบุคลากร: ใช้ฟอร์มเดียวกับหน้าผู้ใช้งาน (ต้องโหลดข้อมูลเต็มที่มีเลขบัตร)
+    "edit-staff": async (id) => {
+      try {
+        const users = await api("GET", "/users?active=all");
+        const u = users.find((x) => String(x.id) === id);
+        if (!u) return toast("ไม่พบข้อมูลบุคลากรนี้", true);
+        userForm(u);
+      } catch (e) { toast(e.message, true); }
+    },
+  };
 }
 
 const rateText = (r) => (r == null ? "-" : `${num(r)}%`);
