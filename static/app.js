@@ -763,10 +763,19 @@ async function staffView() {
 }
 
 let staffShowLeft = false;
+let staffEditMode = false;
 try { staffShowLeft = sessionStorage.getItem("staff-show-left") === "1"; } catch {}
+
+// คอลัมน์ที่แก้ได้ในโหมดแก้ไขทั้งตาราง [ชื่อฟิลด์, หัวคอลัมน์, ความกว้าง, รายการแนะนำ]
+const STAFF_EDIT_COLS = [
+  ["seq", "ลำดับ", "4.5rem"], ["prefix", "คำนำหน้า", "6rem"], ["first_name", "ชื่อ", "9rem"], ["last_name", "นามสกุล", "9rem"],
+  ["position", "ตำแหน่ง", "13rem", "dl-pos"], ["level", "ระดับ", "8rem", "dl-lv"], ["department", "กลุ่มงาน", "11rem", "dl-dept"],
+  ["profession_group", "กลุ่มวิชาชีพ", "11rem", "dl-prof"],
+];
 
 async function staffListTab(body) {
   const admin = isAdmin();
+  if (!admin) staffEditMode = false;
   // ผู้ดูแลโหลดคนที่ออกไปแล้วมาด้วย (ซ่อนไว้ เปิดดูได้เพื่อตรวจ) ผู้ใช้ทั่วไปได้เฉพาะคนที่คงอยู่
   const all = await api("GET", `/staff${admin ? "?include_left=1" : ""}`);
   const staff = all.filter((s) => !s.left_kind);
@@ -777,7 +786,10 @@ async function staffListTab(body) {
   const depts = countBy(base, "department");
   const profs = countBy(staff, "profession_group");
   const filter = { q: "", level: "", position: "", department: "", profession_group: "" };
+  const changes = new Map();   // id → { ฟิลด์: ค่าใหม่ }
+  const byId = new Map(all.map((s) => [String(s.id), s]));
   const select = (id, label, items) => `<select id="${id}">${option("", label)}${items.map(([k, n]) => option(k, `${k} (${n})`)).join("")}</select>`;
+  const datalist = (id, items) => `<datalist id="${id}">${items.filter(([k]) => k !== "ไม่ระบุ").map(([k]) => `<option value="${esc(k)}">`).join("")}</datalist>`;
   body.innerHTML = `
     <div class="stats">
       <div class="stat"><b>${num(staff.length)}</b><span>บุคลากรที่คงอยู่ (คน)</span></div>
@@ -795,27 +807,65 @@ async function staffListTab(body) {
     <div class="toolbar">
       <input type="search" id="q" placeholder="ค้นหาชื่อ ตำแหน่ง ระดับ">
       ${select("f-dept", "ทุกกลุ่มงาน", depts)}${select("f-pos", "ทุกตำแหน่ง", positions)}${select("f-lv", "ทุกระดับ", levels)}
+      ${admin ? (staffEditMode
+        ? `<button class="btn" data-act="edit-cancel">ยกเลิก</button><button class="btn primary" data-act="edit-save" id="save-edits" disabled>บันทึกการแก้ไข</button>`
+        : `<button class="btn primary" data-act="edit-mode">แก้ไขทั้งตาราง</button>`) : ""}
     </div>
+    ${staffEditMode ? `<p class="hint">พิมพ์แก้ในช่องได้เลย ช่องที่แก้จะเป็นสีเหลือง แล้วกด "บันทึกการแก้ไข" ครั้งเดียว (เลขบัตรประชาชนและสิทธิ์แก้ที่เมนูผู้ใช้งาน)</p>
+      ${datalist("dl-pos", positions)}${datalist("dl-lv", levels)}${datalist("dl-dept", depts)}${datalist("dl-prof", profs)}` : ""}
     <section class="list" id="list"></section>`;
   const leftBadge = (s) => (s.left_kind ? ` ${badge(`${META.move_kinds[s.left_kind]} ${when(s.left_on, false)}`, "muted")}` : "");
+  const value = (s, f) => { const c = changes.get(String(s.id)); return c && f in c ? c[f] : s[f] ?? ""; };
+  const editCell = (s, [f, , width, list]) => {
+    const changed = changes.get(String(s.id))?.[f] !== undefined;
+    return `<input class="cell-input ${changed ? "changed" : ""}" style="width:${width}" data-sid="${s.id}" data-f="${f}"
+      ${f === "seq" ? 'type="number" min="1" step="1"' : ""} ${list ? `list="${list}"` : ""} value="${esc(value(s, f))}"
+      aria-label="${esc(f)} ${esc(s.full_name)}">`;
+  };
   const draw = () => {
     const q = filter.q.toLowerCase();
     const is = (s, key) => !filter[key] || (s[key] || "ไม่ระบุ") === filter[key];
     const shown = base.filter((s) => (!q || `${s.full_name} ${s.position || ""} ${s.level || ""} ${s.department || ""}`.toLowerCase().includes(q))
       && is(s, "level") && is(s, "position") && is(s, "department") && is(s, "profession_group"));
     $$("#prof-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.id === filter.profession_group));
-    $("#list").innerHTML = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(base.length)} คน</p>` +
+    const count = `<p class="muted">แสดง ${num(shown.length)} จาก ${num(base.length)} คน</p>`;
+    if (staffEditMode) {
+      $("#list").innerHTML = count + table(STAFF_EDIT_COLS.map((c) => c[1]), shown.map((s) =>
+        STAFF_EDIT_COLS.map((c) => editCell(s, c))), "ไม่พบบุคลากรที่ค้นหา");
+      return;
+    }
+    $("#list").innerHTML = count +
       table(["ลำดับ", "ชื่อ-นามสกุล", "ตำแหน่ง", "ระดับ", "กลุ่มงาน", "กลุ่มวิชาชีพ", ...(admin ? [""] : [])], shown.map((s) => [
         esc(s.seq ?? "-"), `${esc(s.full_name)}${leftBadge(s)}`, esc(s.position || "-"), esc(s.level || "-"),
         esc(s.department || "-"), esc(s.profession_group || "-"),
         ...(admin ? [actions(btn("edit-staff", "แก้ไข", s.id))] : []),
       ]), base.length ? "ไม่พบบุคลากรที่ค้นหา" : "ยังไม่มีข้อมูลบุคลากร");
   };
+  const updateSave = () => {
+    const btnSave = $("#save-edits");
+    if (!btnSave) return;
+    btnSave.disabled = !changes.size;
+    btnSave.textContent = changes.size ? `บันทึกการแก้ไข (${num(changes.size)} คน)` : "บันทึกการแก้ไข";
+  };
+  // จดเฉพาะช่องที่ค่าเปลี่ยนจากเดิม
+  $("#list").oninput = (e) => {
+    const input = e.target.closest(".cell-input");
+    if (!input) return;
+    const id = input.dataset.sid;
+    const f = input.dataset.f;
+    const orig = String(byId.get(id)[f] ?? "");
+    const c = changes.get(id) || {};
+    if (input.value.trim() === orig.trim()) delete c[f]; else c[f] = input.value;
+    if (Object.keys(c).length) changes.set(id, c); else changes.delete(id);
+    input.classList.toggle("changed", f in c);
+    updateSave();
+  };
   $("#q").oninput = (e) => { filter.q = e.target.value.trim(); draw(); };
   $("#f-dept").onchange = (e) => { filter.department = e.target.value; draw(); };
   $("#f-pos").onchange = (e) => { filter.position = e.target.value; draw(); };
   $("#f-lv").onchange = (e) => { filter.level = e.target.value; draw(); };
   if ($("#show-left")) $("#show-left").onchange = (e) => {
+    if (changes.size && !confirm("มีการแก้ไขที่ยังไม่บันทึก ต้องการทิ้งการแก้ไขหรือไม่?")) { e.target.checked = !e.target.checked; return; }
     staffShowLeft = e.target.checked;
     try { sessionStorage.setItem("staff-show-left", staffShowLeft ? "1" : "0"); } catch {}
     refresh();
@@ -823,7 +873,26 @@ async function staffListTab(body) {
   draw();
   return {
     prof: (k) => { filter.profession_group = filter.profession_group === k ? "" : k; draw(); },
-    // แก้ไขข้อมูลบุคลากร: ใช้ฟอร์มเดียวกับหน้าผู้ใช้งาน (ต้องโหลดข้อมูลเต็มที่มีเลขบัตร)
+    "edit-mode": () => { staffEditMode = true; refresh(); },
+    "edit-cancel": () => {
+      if (changes.size && !confirm(`ทิ้งการแก้ไข ${changes.size} คนที่ยังไม่บันทึก?`)) return;
+      staffEditMode = false;
+      refresh();
+    },
+    "edit-save": async (_, b) => {
+      const items = [...changes].map(([id, c]) => ({ id: Number(id), ...c }));
+      b.disabled = true;
+      try {
+        const r = await api("POST", "/staff/bulk-update", { items });
+        toast(`บันทึกแล้ว ${num(r.updated)} คน`);
+        staffEditMode = false;
+        refresh();
+      } catch (e) {
+        toast(e.message, true);
+        b.disabled = false;
+      }
+    },
+    // แก้ไขทีละคน: ใช้ฟอร์มเดียวกับหน้าผู้ใช้งาน (มีเลขบัตรและสิทธิ์ด้วย)
     "edit-staff": async (id) => {
       try {
         const users = await api("GET", "/users?active=all");

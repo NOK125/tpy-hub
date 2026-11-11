@@ -879,7 +879,8 @@ def staff_rows(conn, include_left=False):
         m = left.get(r["id"])
         if m and not include_left:
             continue
-        result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r), "position": r["position"],
+        result.append({"id": r["id"], "seq": r["seq"], "full_name": full_name(r), "prefix": r["prefix"],
+                       "first_name": r["first_name"], "last_name": r["last_name"], "position": r["position"],
                        "level": r["level"], "department": r["department"],
                        "profession_group": r["profession_group"] or guess_profession(r["position"]),
                        "left_kind": m["kind"] if m else None, "left_on": m["moved_on"] if m else None})
@@ -889,6 +890,39 @@ def staff_rows(conn, include_left=False):
 def list_staff(req):
     # ผู้ดูแลขอดูคนที่ออกไปแล้วด้วยได้ เพื่อตรวจว่าจับคู่ชื่อถูกต้อง
     return staff_rows(req.conn, include_left=req.user["role"] == "admin" and req.q("include_left") == "1")
+
+
+STAFF_EDIT_FIELDS = {
+    "prefix": ("คำนำหน้า", 30), "first_name": ("ชื่อ", 100), "last_name": ("นามสกุล", 100),
+    "position": ("ตำแหน่ง", 150), "level": ("ระดับ", 100), "department": ("กลุ่มงาน", 150),
+    "profession_group": ("กลุ่มวิชาชีพ", 100),
+}
+
+
+def bulk_update_staff(req):
+    """แก้ไขข้อมูลบุคลากรหลายคนพร้อมกันจากตาราง (ไม่แตะเลขบัตร สิทธิ์ และรหัสผ่าน)"""
+    items = req.body.get("items")
+    if not isinstance(items, list) or not items:
+        raise ApiError(400, "ไม่มีรายการที่แก้ไข")
+    if len(items) > 1000:
+        raise ApiError(400, "แก้ไขได้ครั้งละไม่เกิน 1,000 คน")
+    updated = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise ApiError(400, "ข้อมูลไม่ถูกต้อง")
+        user = get_user(req.conn, to_id(item.get("id"), "บุคลากร"))
+        who = user["full_name"]
+        values = {}
+        if "seq" in item:
+            values["seq"] = to_id(item.get("seq"), f"ลำดับของ {who}", False)
+        for key, (label, max_len) in STAFF_EDIT_FIELDS.items():
+            if key in item:
+                values[key] = to_str(item.get(key), f"{label}ของ {who}", key in ("first_name", "last_name"), max_len)
+        if values:
+            req.conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                             [*values.values(), user["id"]])
+            updated += 1
+    return {"updated": updated}
 
 
 MOVE_KINDS = {"hire": "รับใหม่", "transfer_in": "รับย้ายเข้า", "resign": "ลาออก", "transfer_out": "ย้ายออก"}
@@ -1836,6 +1870,7 @@ route("GET", "/dashboard", dashboard)
 route("GET", "/export/dashboard.xlsx", export_dashboard)
 route("GET", "/staff", list_staff)
 route("GET", "/staff/retention", retention)
+route("POST", "/staff/bulk-update", bulk_update_staff, "admin")
 route("GET", "/export/staff.xlsx", export_staff, "admin")
 route("GET", "/movements", list_movements, "admin")
 route("POST", "/movements", create_movement, "admin")

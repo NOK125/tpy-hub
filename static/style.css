@@ -369,3 +369,5 @@ body.auth main { max-width: 980px; display: grid; place-items: center; min-heigh
 .badge-btn { border: 0; cursor: pointer; font: inherit; font-size: .8rem; font-weight: 600; }
 .badge-btn:hover { outline: 2px solid var(--primary); outline-offset: 1px; }
 .checkbox.inline { display: inline-flex; margin-left: .6rem; font-weight: 600; }
+.cell-input { padding: .3rem .45rem; font-size: .9rem; min-width: 0; }
+.cell-input.changed { background: var(--warn-bg); border-color: var(--warn); }
