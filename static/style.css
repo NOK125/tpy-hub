@@ -183,6 +183,7 @@ td .btn { vertical-align: middle; }
   padding: .55rem 1rem; border-radius: 9px; white-space: nowrap; }
 .subtabs button:hover { color: var(--text); background: var(--bg); }
 .subtabs button[aria-selected="true"] { background: var(--primary); color: var(--primary-text); font-weight: 600; }
+.subtabs button small { color: inherit; opacity: .85; }
 .section-title { margin: .4rem 0 .8rem; }
 .stat small.sub { display: block; font-size: .8rem; color: var(--muted); margin-top: .15rem; }
 .legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; font-size: .85rem; color: var(--muted); margin-bottom: .6rem; }

@@ -142,6 +142,7 @@ DOC_CATEGORIES = {
     "meeting": "รายงานการประชุม",
     "other": "เอกสารอื่น ๆ",
 }
+ORDER_TYPES = {"other": "คำสั่งอื่น ๆ", "quality": "คำสั่งงานคุณภาพ", "assignment": "คำสั่งมอบหมายรายกลุ่มงาน"}
 CLINIC_STATUS = {"open": "รอตอบ", "answered": "ตอบแล้ว", "closed": "ปิดเรื่อง"}
 
 
@@ -214,6 +215,15 @@ def init_db():
         for col in ("department", "profession_group"):
             if col not in cols:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        # เอกสาร: ประเภทคำสั่ง ปีงบประมาณ และกลุ่มงาน (ของเดิมเป็น "คำสั่งอื่น ๆ" และคิดปีงบจากวันที่เอกสาร)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
+        for col, kind in (("subcategory", "TEXT"), ("fiscal_year", "INTEGER"), ("department", "TEXT")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {kind}")
+        conn.execute("UPDATE documents SET subcategory = 'other' WHERE category = 'order' AND subcategory IS NULL")
+        for r in conn.execute("SELECT id, doc_date, created_at FROM documents WHERE fiscal_year IS NULL").fetchall():
+            conn.execute("UPDATE documents SET fiscal_year = ? WHERE id = ?",
+                         (fiscal_year(date.fromisoformat((r["doc_date"] or r["created_at"])[:10])), r["id"]))
         conn.commit()
     finally:
         conn.close()
@@ -660,6 +670,7 @@ def meta(req):
     return {
         "roles": ROLES,
         "doc_categories": DOC_CATEGORIES,
+        "order_types": ORDER_TYPES,
         "clinic_status": CLINIC_STATUS,
         "move_kinds": MOVE_KINDS,
         "group_by": GROUP_BY,
@@ -1388,8 +1399,8 @@ def plan_timeline(req):
 # ---------- เอกสาร (คำสั่ง ตรวจสุขภาพ รายงานการประชุม เอกสารอื่น ๆ) ----------
 
 DOC_SELECT = """
-    SELECT d.id, d.category, d.title, d.doc_no, d.doc_date, d.note, d.file_name, d.file_size, d.created_at,
-           u.prefix, u.first_name, u.last_name
+    SELECT d.id, d.category, d.subcategory, d.fiscal_year, d.department, d.title, d.doc_no, d.doc_date, d.note,
+           d.file_name, d.file_size, d.created_at, u.prefix, u.first_name, u.last_name
     FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
 """
 
@@ -1405,15 +1416,16 @@ def list_documents(req):
     if req.q("category"):
         where.append("d.category = ?")
         params.append(to_choice(req.q("category"), "หมวดเอกสาร", DOC_CATEGORIES))
+    if req.q("subcategory"):
+        where.append("d.subcategory = ?")
+        params.append(to_choice(req.q("subcategory"), "ประเภทคำสั่ง", ORDER_TYPES))
     search = req.q("q").strip()
     if search:
-        where.append("(d.title LIKE ? OR d.doc_no LIKE ? OR d.note LIKE ?)")
-        params += [f"%{search}%"] * 3
+        where.append("(d.title LIKE ? OR d.doc_no LIKE ? OR d.note LIKE ? OR d.department LIKE ?)")
+        params += [f"%{search}%"] * 4
     if req.q("year"):
-        # ปี พ.ศ. ของวันที่เอกสาร
-        y = to_id(req.q("year"), "ปี") - 543
-        where.append("substr(COALESCE(d.doc_date, d.created_at), 1, 4) = ?")
-        params.append(str(y))
+        where.append("d.fiscal_year = ?")
+        params.append(to_id(req.q("year"), "ปีงบประมาณ"))
     return [doc_row(r) for r in req.conn.execute(
         DOC_SELECT + f" WHERE {' AND '.join(where)} ORDER BY COALESCE(d.doc_date, substr(d.created_at, 1, 10)) DESC, d.id DESC"
         " LIMIT 1000", params)]
@@ -1432,11 +1444,21 @@ def save_pdf(data_b64, name):
 
 
 def doc_values(b):
+    category = to_choice(b.get("category"), "หมวดเอกสาร", DOC_CATEGORIES)
+    doc_date = to_date(b.get("doc_date"), "วันที่เอกสาร")
+    fy = to_id(b.get("fiscal_year"), "ปีงบประมาณ", False) or fiscal_year(date.fromisoformat(doc_date) if doc_date else today())
+    if not 2500 <= fy <= 2700:
+        raise ApiError(400, "ปีงบประมาณไม่ถูกต้อง")
+    sub = to_choice(b.get("subcategory") or "other", "ประเภทคำสั่ง", ORDER_TYPES) if category == "order" else None
     return {
-        "category": to_choice(b.get("category"), "หมวดเอกสาร", DOC_CATEGORIES),
+        "category": category,
+        "subcategory": sub,
+        "fiscal_year": fy,
+        # กลุ่มงานใช้กับคำสั่งมอบหมายรายกลุ่มงาน
+        "department": to_str(b.get("department"), "กลุ่มงาน", max_len=150) if sub == "assignment" else None,
         "title": to_str(b.get("title"), "ชื่อเรื่อง", True, 300),
         "doc_no": to_str(b.get("doc_no"), "เลขที่", max_len=100),
-        "doc_date": to_date(b.get("doc_date"), "วันที่เอกสาร"),
+        "doc_date": doc_date,
         "note": to_str(b.get("note"), "รายละเอียด", max_len=2000),
     }
 

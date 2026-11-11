@@ -429,17 +429,24 @@ async function plansView() {
 
 // ---------- เอกสาร (คำสั่ง ตรวจสุขภาพ รายงานการประชุม เอกสารอื่น ๆ) ----------
 
-function documentForm(category, doc) {
+// ปีงบประมาณ พ.ศ. ของวันที่ (เริ่ม 1 ต.ค.)
+const fyOf = (iso) => { const [y, m] = iso.slice(0, 7).split("-").map(Number); return y + 543 + (m >= 10 ? 1 : 0); };
+const docFy = (d) => d.fiscal_year || fyOf(d.doc_date || d.created_at);
+
+function documentForm(category, doc, defaults = {}) {
   const isOrder = category === "order";
-  openForm({
-    title: doc ? "แก้ไขเอกสาร" : `อัปโหลด${META.doc_categories[category]}`,
+  const form = openForm({
+    title: doc ? "แก้ไขเอกสาร" : `อัปโหลด${isOrder ? META.order_types[defaults.subcategory || "other"] : META.doc_categories[category]}`,
     two: true,
     wide: true,
-    values: doc || { doc_date: todayIso() },
+    values: doc || { doc_date: todayIso(), fiscal_year: defaults.fiscal_year || META.fiscal_year, subcategory: defaults.subcategory || "other" },
     fields: [
-      { name: "title", label: isOrder ? "เรื่อง" : "ชื่อเอกสาร", required: true, wide: true },
+      ...(isOrder ? [{ name: "subcategory", label: "ประเภทคำสั่ง", type: "select", required: true, options: Object.entries(META.order_types) }] : []),
+      { name: "fiscal_year", label: "ปีงบประมาณ", type: "number", required: true, min: 2500, max: 2700, step: 1, hint: "ปรับตามวันที่เอกสารให้อัตโนมัติ" },
+      { name: "title", label: isOrder ? "ชื่อคำสั่ง / เรื่อง" : "ชื่อเอกสาร", required: true, wide: true },
       { name: "doc_no", label: isOrder ? "เลขที่คำสั่ง" : "เลขที่ (ถ้ามี)", placeholder: isOrder ? "เช่น 123/2569" : "" },
       { name: "doc_date", label: "วันที่เอกสาร", type: "date" },
+      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย", placeholder: "เช่น กลุ่มการพยาบาล" }] : []),
       { name: "note", label: "รายละเอียดเพิ่มเติม", type: "textarea", wide: true },
       { name: "file", label: doc ? `ไฟล์ PDF (มีแล้ว: ${doc.file_name})` : "ไฟล์ PDF", type: "file", required: !doc,
         accept: "application/pdf,.pdf", hint: doc ? "เลือกไฟล์ใหม่ถ้าต้องการแทนที่" : "ไม่เกิน 15 MB", wide: true },
@@ -453,38 +460,76 @@ function documentForm(category, doc) {
       refresh();
     },
   });
+  // เปลี่ยนวันที่เอกสาร → ปีงบประมาณตามวันที่นั้น
+  $("[name=doc_date]", form).onchange = (e) => { if (e.target.value) $("[name=fiscal_year]", form).value = fyOf(e.target.value); };
+  // ช่องกลุ่มงานแสดงเฉพาะคำสั่งมอบหมายรายกลุ่มงาน
+  const sub = $("[name=subcategory]", form);
+  if (sub) {
+    const toggle = () => { $("[name=department]", form).closest(".field").hidden = sub.value !== "assignment"; };
+    sub.onchange = toggle;
+    toggle();
+  }
 }
+
+const docFilters = {};   // ค่าตัวกรองของแต่ละหน้า จำไว้ตอนสลับไปมา
 
 function documentsView(category) {
   return async () => {
-    const list = await api("GET", `/documents?category=${category}`);
+    const all = await api("GET", `/documents?category=${category}`);
     const admin = isAdmin();
-    const years = [...new Set(list.map((d) => Number((d.doc_date || d.created_at).slice(0, 4)) + 543))].sort((a, b) => b - a);
-    view.innerHTML = `<div class="toolbar"><h2>${esc(META.doc_categories[category])} <small>(${list.length})</small></h2>
-        <input type="search" id="q" placeholder="ค้นหาชื่อเรื่องหรือเลขที่">
-        ${years.length > 1 ? `<select id="y">${option("", "ทุกปี")}${years.map((y) => option(y, `ปี ${y}`)).join("")}</select>` : ""}
+    const isOrder = category === "order";
+    const f = docFilters[category] ||= { q: "", year: "", department: "", sub: "other" };
+    try { if (isOrder) f.sub = sessionStorage.getItem("order-type") || f.sub; } catch {}
+    const list = isOrder ? all.filter((d) => (d.subcategory || "other") === f.sub) : all;
+    const yearCount = new Map();
+    for (const d of list) yearCount.set(docFy(d), (yearCount.get(docFy(d)) || 0) + 1);
+    const years = [...new Set([...yearCount.keys(), META.fiscal_year])].sort((a, b) => b - a);
+    if (f.year && !years.includes(Number(f.year))) f.year = "";
+    const depts = [...new Set(list.map((d) => d.department).filter(Boolean))].sort();
+    const isAssign = isOrder && f.sub === "assignment";
+    const subCount = (k) => all.filter((d) => (d.subcategory || "other") === k).length;
+    const title = isOrder ? META.order_types[f.sub] : META.doc_categories[category];
+    view.innerHTML = `
+      <div class="toolbar"><h2>${esc(META.doc_categories[category])} <small>(${all.length})</small></h2>
         ${admin ? `<button class="btn primary" data-act="new">+ อัปโหลด PDF</button>` : ""}
-      </div><section class="list" id="list"></section>`;
+      </div>
+      ${isOrder ? `<div class="subtabs" role="tablist">${Object.entries(META.order_types).map(([k, label]) =>
+        `<button type="button" role="tab" data-act="sub" data-id="${k}" aria-selected="${k === f.sub}">${esc(label)} <small>(${subCount(k)})</small></button>`).join("")}</div>` : ""}
+      <div class="toolbar">
+        <select id="y" aria-label="ปีงบประมาณ">${option("", `ทุกปีงบประมาณ (${list.length})`, f.year)}${years.map((y) =>
+          option(y, `ปีงบประมาณ ${y} (${yearCount.get(y) || 0})`, f.year)).join("")}</select>
+        ${isAssign && depts.length ? `<select id="dept">${option("", "ทุกกลุ่มงาน", f.department)}${depts.map((d) => option(d, d, f.department)).join("")}</select>` : ""}
+        <input type="search" id="q" placeholder="ค้นหาชื่อคำสั่ง เลขที่ หรือคำสำคัญ" value="${esc(f.q)}">
+      </div>
+      <section class="list" id="list"></section>`;
     const draw = () => {
-      const q = $("#q").value.trim().toLowerCase();
-      const y = $("#y")?.value || "";
-      const shown = list.filter((d) => (!q || `${d.title} ${d.doc_no || ""} ${d.note || ""}`.toLowerCase().includes(q))
-        && (!y || String(Number((d.doc_date || d.created_at).slice(0, 4)) + 543) === y));
-      $("#list").innerHTML = table(["วันที่", category === "order" ? "เลขที่คำสั่ง" : "เลขที่", "ชื่อเรื่อง", "ไฟล์", ""], shown.map((d) => [
-        when(d.doc_date || d.created_at, false), esc(d.doc_no || "-"),
-        `${esc(d.title)}${d.note ? `<br><small>${esc(d.note)}</small>` : ""}`,
-        `<small>${fileSize(d.file_size)}</small>`,
-        actions(`<a class="btn small primary" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">เปิด</a>`,
-          `<a class="btn small" href="/api/documents/${d.id}/file?download=1">ดาวน์โหลด</a>`,
-          admin ? btn("edit", "แก้ไข", d.id) : "", admin ? btn("delete", "ลบ", d.id, "danger") : ""),
-      ]), list.length ? "ไม่พบเอกสารที่ค้นหา" : "ยังไม่มีเอกสาร");
+      const words = f.q.toLowerCase().split(/\s+/).filter(Boolean);
+      const shown = list.filter((d) => {
+        const text = `${d.title} ${d.doc_no || ""} ${d.note || ""} ${d.department || ""}`.toLowerCase();
+        return words.every((w) => text.includes(w)) && (!f.year || String(docFy(d)) === String(f.year))
+          && (!f.department || d.department === f.department);
+      });
+      const head = ["วันที่", isOrder ? "เลขที่คำสั่ง" : "เลขที่", "ชื่อเรื่อง", ...(f.year ? [] : ["ปีงบ"]), ...(isAssign ? ["กลุ่มงาน"] : []), "ไฟล์", ""];
+      $("#list").innerHTML = `<p class="muted">${esc(title)} · แสดง ${num(shown.length)} จาก ${num(list.length)} ฉบับ</p>` +
+        table(head, shown.map((d) => [
+          when(d.doc_date || d.created_at, false), esc(d.doc_no || "-"),
+          `${esc(d.title)}${d.note ? `<br><small>${esc(d.note)}</small>` : ""}`,
+          ...(f.year ? [] : [esc(docFy(d))]),
+          ...(isAssign ? [esc(d.department || "-")] : []),
+          `<small>${fileSize(d.file_size)}</small>`,
+          actions(`<a class="btn small primary" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">เปิด</a>`,
+            `<a class="btn small" href="/api/documents/${d.id}/file?download=1">ดาวน์โหลด</a>`,
+            admin ? btn("edit", "แก้ไข", d.id) : "", admin ? btn("delete", "ลบ", d.id, "danger") : ""),
+        ]), list.length ? "ไม่พบเอกสารที่ค้นหา" : `ยังไม่มี${title}`);
     };
-    $("#q").oninput = draw;
-    if ($("#y")) $("#y").onchange = draw;
+    $("#q").oninput = (e) => { f.q = e.target.value.trim(); draw(); };
+    $("#y").onchange = (e) => { f.year = e.target.value; draw(); };
+    if ($("#dept")) $("#dept").onchange = (e) => { f.department = e.target.value; draw(); };
     draw();
-    const byId = (id) => list.find((d) => String(d.id) === id);
+    const byId = (id) => all.find((d) => String(d.id) === id);
     bind({
-      new: () => documentForm(category, null),
+      sub: (k) => { f.sub = k; f.department = ""; f.q = ""; try { sessionStorage.setItem("order-type", k); } catch {} refresh(); },
+      new: () => documentForm(category, null, { subcategory: f.sub, fiscal_year: f.year || META.fiscal_year }),
       edit: (id) => documentForm(category, byId(id)),
       delete: async (id) => {
         if (!confirm(`ลบเอกสาร "${byId(id).title}"? ไฟล์จะถูกลบถาวร`)) return;
