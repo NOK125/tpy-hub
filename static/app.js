@@ -252,6 +252,7 @@ async function dashboardView() {
         ${table(["วันที่", "หน่วยงาน", "รายการ", ["จำนวนเงิน", "num"]], d.recent_expenses.map((e) =>
           [when(e.date, false), esc(e.department), esc(e.description), [money(e.amount), "num"]]), "ยังไม่มีการตัดงบ")}
       </section>
+      ${ordersHtml(d.orders, d.fiscal_year)}
       <section class="card"><h2>เอกสาร</h2>
         <div class="doc-counts">${Object.entries(d.documents).map(([k, n]) =>
           `<button class="stat" data-act="go" data-id="doc-${k}"><b>${num(n)}</b><span>${esc(META.doc_categories[k])}</span></button>`).join("")}</div>
@@ -267,6 +268,26 @@ async function dashboardView() {
     pdf: () => window.print(),
     retention: () => { staffTab = "retention"; try { sessionStorage.setItem("staff-tab", "retention"); } catch {} show("staff"); },
   });
+}
+
+// สรุปคำสั่งในหน้า Dashboard (ปีงบที่เลือก)
+function ordersHtml(o, year) {
+  const t = o.total;
+  const maxDept = Math.max(1, ...o.by_department.map((x) => x.n));
+  return `<section class="card"><h2>คำสั่ง ปีงบ ${year}</h2>
+    <div class="stats">
+      <button class="stat" data-act="go" data-id="doc-order"><b>${num(t.total)}</b><span>คำสั่งทั้งหมด</span></button>
+      <button class="stat" data-act="go" data-id="doc-order"><b class="plus">${num(t.active)}</b><span>Active</span></button>
+      <button class="stat" data-act="go" data-id="doc-order"><b>${num(t.inactive)}</b><span>Inactive</span></button>
+    </div>
+    ${table(["ประเภท", ["ทั้งหมด", "num"], ["Active", "num"], ["Inactive", "num"], ["ทุกปีงบ", "num"]], o.by_type.map((x) => [
+      esc(x.label), [num(x.total), "num"], [num(x.active), "num"], [num(x.inactive), "num"], [num(x.all_years), "num"],
+    ]), "")}
+    ${o.by_department.length ? `<h3>คำสั่งมอบหมายที่ Active แยกตามกลุ่มงาน</h3>
+      <div class="meter-list">${o.by_department.map((x) => `<div class="meter">
+        <div class="meter-label"><span>${esc(x.label)}</span><small>${num(x.n)} ฉบับ</small></div>${bar(x.n, maxDept, "alt")}</div>`).join("")}</div>` : ""}
+    ${isAdmin() && o.without_number ? `<p class="hint">มีคำสั่ง ${num(o.without_number)} ฉบับในปีงบนี้ที่ยังไม่มีเลขที่คำสั่ง</p>` : ""}
+  </section>`;
 }
 
 // อัตราการคงอยู่และการเข้า-ออกในหน้า Dashboard
@@ -450,7 +471,8 @@ function documentForm(category, doc, defaults = {}) {
       { name: "title", label: isOrder ? "ชื่อคำสั่ง / เรื่อง" : "ชื่อเอกสาร", required: true, wide: true },
       { name: "doc_no", label: isOrder ? "เลขที่คำสั่ง" : "เลขที่ (ถ้ามี)", placeholder: isOrder ? "เช่น 123/2569" : "" },
       { name: "doc_date", label: "วันที่เอกสาร", type: "date" },
-      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย", placeholder: "เช่น กลุ่มการพยาบาล" }] : []),
+      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย", placeholder: "เช่น กลุ่มการพยาบาล" },
+        { name: "status", label: "สถานะ", type: "select", options: Object.entries(META.doc_status), hint: "Inactive = ยกเลิก/หมดอายุ/มีคำสั่งใหม่แทน" }] : []),
       { name: "note", label: "รายละเอียดเพิ่มเติม", type: "textarea", wide: true },
       { name: "file", label: doc ? `ไฟล์ PDF (มีแล้ว: ${doc.file_name})` : "ไฟล์ PDF", type: "file", required: !doc,
         accept: "application/pdf,.pdf", hint: doc ? "เลือกไฟล์ใหม่ถ้าต้องการแทนที่" : "ไม่เกิน 15 MB", wide: true },
@@ -482,12 +504,14 @@ function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
     .sort((a, b) => b - a).map((y) => [y, `ปีงบประมาณ ${y}`]);
   const form = openForm({
     title: `อัปโหลด${isOrder ? "คำสั่ง" : META.doc_categories[category]}`,
-    values: { subcategory, fiscal_year },
+    values: { subcategory, fiscal_year, auto_number: true, number_year: thisBeYear() },
     intro: `<p class="hint">เลือกปีงบประมาณ แล้วเลือกไฟล์ PDF ได้หลายไฟล์พร้อมกัน (กด Ctrl หรือลากคลุม) ชื่อเรื่องจะใช้ชื่อไฟล์ เพิ่มเลขที่หรือรายละเอียดภายหลังได้ด้วยปุ่ม "แก้ไข"</p>`,
     fields: [
       ...(isOrder ? [{ name: "subcategory", label: "ประเภทคำสั่ง", type: "select", required: true, options: Object.entries(META.order_types) }] : []),
       { name: "fiscal_year", label: "ปีงบประมาณ", type: "select", required: true, options: yearOptions },
-      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย (ถ้ามี)", placeholder: "เช่น กลุ่มการพยาบาล" }] : []),
+      ...(isOrder ? [{ name: "department", label: "กลุ่มงานที่มอบหมาย (ถ้ามี)", placeholder: "เช่น กลุ่มการพยาบาล" },
+        { name: "auto_number", label: "ตั้งเลขที่คำสั่งจากเลขหน้าชื่อไฟล์ (เช่น ไฟล์ \"171 ...\" → 171/ปี)", type: "checkbox" },
+        { name: "number_year", label: "ปีของเลขที่คำสั่ง (พ.ศ.)", type: "number", min: 2500, max: 2700, step: 1 }] : []),
       { name: "files", label: "ไฟล์ PDF (เลือกได้หลายไฟล์)", type: "file", required: true, multiple: true, accept: "application/pdf,.pdf",
         hint: "ไฟล์ละไม่เกิน 15 MB" },
     ],
@@ -505,7 +529,10 @@ function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
         status.textContent = `กำลังอัปโหลด ${i + 1} / ${files.length}: ${file.name}`;
         try {
           const data = await readOneFile(file, [".pdf"], "ไฟล์");
-          await api("POST", "/documents", { ...d, category, title: file.name.replace(/\.pdf$/i, "").trim(), ...data });
+          const title = file.name.replace(/\.pdf$/i, "").trim();
+          const lead = title.match(/^\s*(\d{1,5})(?=\D|$)/);
+          const doc_no = isOrder && d.auto_number && lead ? `${Number(lead[1])}/${d.number_year}` : "";
+          await api("POST", "/documents", { ...d, category, title, doc_no, ...data });
         } catch (err) {
           failed.push(`${file.name}: ${err.message}`);
         }
@@ -529,13 +556,23 @@ function bulkUploadForm(category, { subcategory, fiscal_year, years }) {
 }
 
 const docFilters = {};   // ค่าตัวกรองของแต่ละหน้า จำไว้ตอนสลับไปมา
+const thisBeYear = () => new Date().getFullYear() + 543;
+
+// สถานะคำสั่ง: ผู้ดูแลกดสลับ Active/Inactive ได้ที่ป้าย
+function statusCell(d, admin) {
+  const st = d.status || "active";
+  const cls = st === "active" ? "ok" : "muted";
+  return admin
+    ? `<button type="button" class="badge ${cls} badge-btn" data-act="toggle" data-id="${d.id}" title="กดเพื่อสลับสถานะ">${esc(META.doc_status[st])}</button>`
+    : badge(META.doc_status[st], cls);
+}
 
 function documentsView(category) {
   return async () => {
     const all = await api("GET", `/documents?category=${category}`);
     const admin = isAdmin();
     const isOrder = category === "order";
-    const f = docFilters[category] ||= { q: "", year: "", department: "", sub: "other" };
+    const f = docFilters[category] ||= { q: "", year: "", department: "", sub: "other", status: "" };
     try { if (isOrder) f.sub = sessionStorage.getItem("order-type") || f.sub; } catch {}
     const list = isOrder ? all.filter((d) => (d.subcategory || "other") === f.sub) : all;
     const yearCount = new Map();
@@ -548,6 +585,7 @@ function documentsView(category) {
     const title = isOrder ? META.order_types[f.sub] : META.doc_categories[category];
     view.innerHTML = `
       <div class="toolbar"><h2>${esc(META.doc_categories[category])} <small>(${all.length})</small></h2>
+        ${admin && isOrder ? `<button class="btn" data-act="fill">เติมเลขที่คำสั่งจากชื่อเรื่อง</button>` : ""}
         ${admin ? `<button class="btn primary" data-act="new">+ อัปโหลด PDF</button>` : ""}
       </div>
       ${isOrder ? `<div class="subtabs" role="tablist">${Object.entries(META.order_types).map(([k, label]) =>
@@ -556,6 +594,7 @@ function documentsView(category) {
         <select id="y" aria-label="ปีงบประมาณ">${option("", `ทุกปีงบประมาณ (${list.length})`, f.year)}${years.map((y) =>
           option(y, `ปีงบประมาณ ${y} (${yearCount.get(y) || 0})`, f.year)).join("")}</select>
         ${isAssign && depts.length ? `<select id="dept">${option("", "ทุกกลุ่มงาน", f.department)}${depts.map((d) => option(d, d, f.department)).join("")}</select>` : ""}
+        ${isOrder ? `<select id="st">${option("", "ทุกสถานะ", f.status)}${Object.entries(META.doc_status).map(([k, v]) => option(k, v, f.status)).join("")}</select>` : ""}
         <input type="search" id="q" placeholder="ค้นหาชื่อคำสั่ง เลขที่ หรือคำสำคัญ" value="${esc(f.q)}">
       </div>
       <section class="list" id="list"></section>`;
@@ -564,15 +603,16 @@ function documentsView(category) {
       const shown = list.filter((d) => {
         const text = `${d.title} ${d.doc_no || ""} ${d.note || ""} ${d.department || ""}`.toLowerCase();
         return words.every((w) => text.includes(w)) && (!f.year || String(docFy(d)) === String(f.year))
-          && (!f.department || d.department === f.department);
+          && (!f.department || d.department === f.department) && (!f.status || (d.status || "active") === f.status);
       });
-      const head = ["วันที่", isOrder ? "เลขที่คำสั่ง" : "เลขที่", "ชื่อเรื่อง", ...(f.year ? [] : ["ปีงบ"]), ...(isAssign ? ["กลุ่มงาน"] : []), "ไฟล์", ""];
+      const head = ["วันที่", isOrder ? "เลขที่คำสั่ง" : "เลขที่", "ชื่อเรื่อง", ...(f.year ? [] : ["ปีงบ"]), ...(isAssign ? ["กลุ่มงาน"] : []), ...(isOrder ? ["สถานะ"] : []), "ไฟล์", ""];
       $("#list").innerHTML = `<p class="muted">${esc(title)} · แสดง ${num(shown.length)} จาก ${num(list.length)} ฉบับ</p>` +
         table(head, shown.map((d) => [
           when(d.doc_date || d.created_at, false), esc(d.doc_no || "-"),
           `${esc(d.title)}${d.note ? `<br><small>${esc(d.note)}</small>` : ""}`,
           ...(f.year ? [] : [esc(docFy(d))]),
           ...(isAssign ? [esc(d.department || "-")] : []),
+          ...(isOrder ? [statusCell(d, admin)] : []),
           `<small>${fileSize(d.file_size)}</small>`,
           actions(`<a class="btn small primary" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">เปิด</a>`,
             `<a class="btn small" href="/api/documents/${d.id}/file?download=1">ดาวน์โหลด</a>`,
@@ -582,12 +622,39 @@ function documentsView(category) {
     $("#q").oninput = (e) => { f.q = e.target.value.trim(); draw(); };
     $("#y").onchange = (e) => { f.year = e.target.value; draw(); };
     if ($("#dept")) $("#dept").onchange = (e) => { f.department = e.target.value; draw(); };
+    if ($("#st")) $("#st").onchange = (e) => { f.status = e.target.value; draw(); };
     draw();
     const byId = (id) => all.find((d) => String(d.id) === id);
     bind({
       sub: (k) => { f.sub = k; f.department = ""; f.q = ""; try { sessionStorage.setItem("order-type", k); } catch {} refresh(); },
       new: () => bulkUploadForm(category, { subcategory: f.sub, fiscal_year: f.year || META.fiscal_year, years }),
       edit: (id) => documentForm(category, byId(id)),
+      toggle: async (id) => {
+        const d = byId(id);
+        const next = (d.status || "active") === "active" ? "inactive" : "active";
+        try {
+          Object.assign(d, await api("POST", `/documents/${id}/status`, { status: next }));
+          toast(`${d.doc_no || d.title}: ${META.doc_status[next]}`);
+          draw();
+        } catch (e) { toast(e.message, true); }
+      },
+      fill: () => openForm({
+        title: "เติมเลขที่คำสั่งจากเลขหน้าชื่อเรื่อง",
+        intro: `<p class="hint">คำสั่งที่ยังไม่มีเลขที่ และชื่อเรื่องขึ้นต้นด้วยตัวเลข เช่น "171 In-ac26 ผู้รับผิดชอบ..." จะได้เลขที่ 171/ปี ที่ใส่ด้านล่าง คำสั่งที่มีเลขที่อยู่แล้วจะไม่ถูกเปลี่ยน</p>`,
+        values: { year: thisBeYear(), scope: "all" },
+        fields: [
+          { name: "year", label: "ปีของเลขที่คำสั่ง (พ.ศ.)", type: "number", required: true, min: 2500, max: 2700, step: 1 },
+          { name: "scope", label: "ใช้กับ", type: "select", options: [["all", "คำสั่งทุกประเภททุกปีงบ"],
+            ["view", `เฉพาะ${META.order_types[f.sub]}${f.year ? ` ปีงบ ${f.year}` : ""}`]] },
+        ],
+        submitLabel: "เติมเลขที่",
+        onSubmit: async (v) => {
+          const r = await api("POST", "/documents/fill-numbers", { year: v.year,
+            ...(v.scope === "view" ? { subcategory: f.sub, fiscal_year: f.year || "" } : {}) });
+          toast(`เติมเลขที่แล้ว ${num(r.updated)} ฉบับ${r.skipped ? ` · ข้าม ${num(r.skipped)} ฉบับ (ชื่อเรื่องไม่ขึ้นต้นด้วยตัวเลข)` : ""}`);
+          refresh();
+        },
+      }),
       delete: async (id) => {
         if (!confirm(`ลบเอกสาร "${byId(id).title}"? ไฟล์จะถูกลบถาวร`)) return;
         try { await api("POST", `/documents/${id}/delete`, {}); toast("ลบแล้ว"); refresh(); } catch (e) { toast(e.message, true); }

@@ -142,6 +142,7 @@ DOC_CATEGORIES = {
     "meeting": "รายงานการประชุม",
     "other": "เอกสารอื่น ๆ",
 }
+DOC_STATUS = {"active": "Active", "inactive": "Inactive"}
 ORDER_TYPES = {"other": "คำสั่งอื่น ๆ", "quality": "คำสั่งงานคุณภาพ", "assignment": "คำสั่งมอบหมายรายกลุ่มงาน"}
 CLINIC_STATUS = {"open": "รอตอบ", "answered": "ตอบแล้ว", "closed": "ปิดเรื่อง"}
 
@@ -217,7 +218,8 @@ def init_db():
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         # เอกสาร: ประเภทคำสั่ง ปีงบประมาณ และกลุ่มงาน (ของเดิมเป็น "คำสั่งอื่น ๆ" และคิดปีงบจากวันที่เอกสาร)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
-        for col, kind in (("subcategory", "TEXT"), ("fiscal_year", "INTEGER"), ("department", "TEXT")):
+        for col, kind in (("subcategory", "TEXT"), ("fiscal_year", "INTEGER"), ("department", "TEXT"),
+                          ("status", "TEXT NOT NULL DEFAULT 'active'")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {kind}")
         conn.execute("UPDATE documents SET subcategory = 'other' WHERE category = 'order' AND subcategory IS NULL")
@@ -671,6 +673,7 @@ def meta(req):
         "roles": ROLES,
         "doc_categories": DOC_CATEGORIES,
         "order_types": ORDER_TYPES,
+        "doc_status": DOC_STATUS,
         "clinic_status": CLINIC_STATUS,
         "move_kinds": MOVE_KINDS,
         "group_by": GROUP_BY,
@@ -1399,7 +1402,7 @@ def plan_timeline(req):
 # ---------- เอกสาร (คำสั่ง ตรวจสุขภาพ รายงานการประชุม เอกสารอื่น ๆ) ----------
 
 DOC_SELECT = """
-    SELECT d.id, d.category, d.subcategory, d.fiscal_year, d.department, d.title, d.doc_no, d.doc_date, d.note,
+    SELECT d.id, d.category, d.subcategory, d.fiscal_year, d.department, d.status, d.title, d.doc_no, d.doc_date, d.note,
            d.file_name, d.file_size, d.created_at, u.prefix, u.first_name, u.last_name
     FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
 """
@@ -1460,6 +1463,7 @@ def doc_values(b):
         "doc_no": to_str(b.get("doc_no"), "เลขที่", max_len=100),
         "doc_date": doc_date,
         "note": to_str(b.get("note"), "รายละเอียด", max_len=2000),
+        "status": to_choice(b.get("status") or "active", "สถานะ", DOC_STATUS),
     }
 
 
@@ -1491,6 +1495,64 @@ def update_document(req, doc_id):
     if old_key:
         (FILES_DIR / old_key).unlink(missing_ok=True)
     return get_document(req, doc_id)
+
+
+def set_document_status(req, doc_id):
+    get_document(req, doc_id)
+    req.conn.execute("UPDATE documents SET status = ? WHERE id = ?",
+                     (to_choice(req.body.get("status"), "สถานะ", DOC_STATUS), doc_id))
+    return get_document(req, doc_id)
+
+
+LEADING_NUMBER = re.compile(r"^\s*(\d{1,5})(?=\D|$)")
+
+
+def fill_order_numbers(req):
+    """เลขที่คำสั่ง = เลขหน้าชื่อเรื่อง/ปี (เฉพาะคำสั่งที่ยังไม่มีเลขที่) เช่น "171 In-ac26 ..." → 171/2569"""
+    year = to_id(req.body.get("year"), "ปีของเลขที่คำสั่ง")
+    if not 2500 <= year <= 2700:
+        raise ApiError(400, "ปีของเลขที่คำสั่งต้องเป็นปี พ.ศ.")
+    where, params = "category = 'order' AND (doc_no IS NULL OR doc_no = '')", []
+    if req.body.get("subcategory"):
+        where += " AND subcategory = ?"
+        params.append(to_choice(req.body.get("subcategory"), "ประเภทคำสั่ง", ORDER_TYPES))
+    if req.body.get("fiscal_year"):
+        where += " AND fiscal_year = ?"
+        params.append(to_id(req.body.get("fiscal_year"), "ปีงบประมาณ"))
+    updated = skipped = 0
+    for r in req.conn.execute(f"SELECT id, title FROM documents WHERE {where}", params).fetchall():
+        m = LEADING_NUMBER.match(r["title"])
+        if m:
+            req.conn.execute("UPDATE documents SET doc_no = ? WHERE id = ?", (f"{int(m.group(1))}/{year}", r["id"]))
+            updated += 1
+        else:
+            skipped += 1
+    return {"updated": updated, "skipped": skipped}
+
+
+def order_summary(conn, year):
+    """สรุปคำสั่งสำหรับ Dashboard: แยกประเภท สถานะ และกลุ่มงาน (ปีงบที่เลือก)"""
+    by_type = []
+    for key, label in ORDER_TYPES.items():
+        row = conn.execute(
+            """SELECT COUNT(*) AS total, SUM(status = 'active') AS active, SUM(status = 'inactive') AS inactive
+               FROM documents WHERE category = 'order' AND subcategory = ? AND fiscal_year = ?""", (key, year)).fetchone()
+        all_years = conn.execute("SELECT COUNT(*) FROM documents WHERE category = 'order' AND subcategory = ?",
+                                 (key,)).fetchone()[0]
+        by_type.append({"type": key, "label": label, "total": row["total"], "active": row["active"] or 0,
+                        "inactive": row["inactive"] or 0, "all_years": all_years})
+    depts = rows(conn.execute(
+        """SELECT COALESCE(NULLIF(department, ''), 'ไม่ระบุ') AS label, COUNT(*) AS n FROM documents
+           WHERE category = 'order' AND subcategory = 'assignment' AND fiscal_year = ? AND status = 'active'
+           GROUP BY label ORDER BY n DESC""", (year,)))
+    years = rows(conn.execute(
+        """SELECT fiscal_year, COUNT(*) AS n FROM documents WHERE category = 'order' AND fiscal_year IS NOT NULL
+           GROUP BY fiscal_year ORDER BY fiscal_year DESC LIMIT 6"""))
+    total = {k: sum(t[k] for t in by_type) for k in ("total", "active", "inactive", "all_years")}
+    return {"by_type": by_type, "total": total, "by_department": depts, "by_year": years,
+            "without_number": conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE category = 'order' AND fiscal_year = ? AND (doc_no IS NULL OR doc_no = '')",
+                (year,)).fetchone()[0]}
 
 
 def delete_document(req, doc_id):
@@ -1612,7 +1674,9 @@ def dashboard_data(conn, user, year):
     return {
         "fiscal_year": year,
         "years": sorted(set(plan_years(conn)) | {fiscal_year(date.fromisoformat(r[0])) for r in conn.execute(
-            "SELECT DISTINCT moved_on FROM staff_movements")}, reverse=True),
+            "SELECT DISTINCT moved_on FROM staff_movements")} | {r[0] for r in conn.execute(
+            "SELECT DISTINCT fiscal_year FROM documents WHERE category = 'order' AND fiscal_year IS NOT NULL")},
+            reverse=True),
         "generated_at": now(),
         "staff_total": staff["total"],
         "staff_not_activated": staff["not_activated"] or 0,
@@ -1627,6 +1691,7 @@ def dashboard_data(conn, user, year):
         "latest_documents": latest_docs,
         "recent_expenses": timeline_events(conn, year)[:6],
         "workforce": workforce_summary(conn, year),
+        "orders": order_summary(conn, year),
     }
 
 
@@ -1714,7 +1779,11 @@ def export_dashboard(req):
         ("สรุป", summary), ("แผนพัฒนาบุคลากร", plans), ("ประวัติการตัดงบ", timeline),
         ("บุคลากรตามระดับ", levels), ("บุคลากรตามตำแหน่ง", positions),
         ("อัตราการคงอยู่", retention_sheet(req.conn, d["fiscal_year"], "profession_group")),
-        ("เข้า-ออกรายเดือน", monthly)])
+        ("เข้า-ออกรายเดือน", monthly),
+        ("คำสั่ง", [["ประเภทคำสั่ง", f"ปีงบ {d['fiscal_year']}", "Active", "Inactive", "ทุกปีงบ"]] + [
+            [t["label"], t["total"], t["active"], t["inactive"], t["all_years"]] for t in d["orders"]["by_type"]] + [
+            ["รวม", d["orders"]["total"]["total"], d["orders"]["total"]["active"], d["orders"]["total"]["inactive"],
+             d["orders"]["total"]["all_years"]]])])
 
 
 TH_MONTH_NAMES = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม",
@@ -1770,6 +1839,8 @@ route("POST", "/documents", create_document, "admin")
 route("GET", f"/documents/{ID}/file", document_file)
 route("PUT", f"/documents/{ID}", update_document, "admin")
 route("POST", f"/documents/{ID}/delete", delete_document, "admin")
+route("POST", f"/documents/{ID}/status", set_document_status, "admin")
+route("POST", "/documents/fill-numbers", fill_order_numbers, "admin")
 route("GET", "/clinic", list_clinic)
 route("POST", "/clinic", create_clinic)
 route("GET", f"/clinic/{ID}", get_clinic)
