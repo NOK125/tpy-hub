@@ -223,6 +223,8 @@ async function dashboardView() {
     <div class="print-only print-head"><h1>Dashboard งานบริหารทรัพยากรบุคคล โรงพยาบาลตาพระยา</h1>
       <p>ปีงบประมาณ ${d.fiscal_year} · ข้อมูล ณ วันที่ ${when(d.generated_at)}</p></div>
     <div class="toolbar no-print"><h2>Dashboard</h2>
+      <span class="live-dot" title="อัปเดตอัตโนมัติทุก 30 วินาที">อัปเดตล่าสุด ${new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+      <button class="btn" data-act="reload">รีเฟรช</button>
       ${yearSelect(d.years, d.fiscal_year)}
       <a class="btn" href="/api/export/dashboard.xlsx?year=${d.fiscal_year}">ดาวน์โหลด Excel</a>
       <button class="btn" data-act="pdf">ดาวน์โหลด PDF</button>
@@ -266,6 +268,7 @@ async function dashboardView() {
   bind({
     go: (tab) => tab && show(tab),
     pdf: () => window.print(),
+    reload: () => refresh(),
     retention: () => { staffTab = "retention"; try { sessionStorage.setItem("staff-tab", "retention"); } catch {} show("staff"); },
   });
 }
@@ -1255,6 +1258,18 @@ const VIEWS = {
 };
 const allowed = (key) => !VIEWS[key][2] || me?.role === VIEWS[key][2];
 let current = null;
+
+// Dashboard อัปเดตอัตโนมัติ: ทุก 30 วินาทีขณะเปิดหน้านี้อยู่ และทันทีเมื่อกลับมาที่แท็บเบราว์เซอร์นี้
+const DASHBOARD_REFRESH_MS = 30000;
+let dashboardBusy = false;
+async function liveDashboard() {
+  if (!me || current !== "dashboard" || document.hidden || dlg.open || dashboardBusy) return;
+  dashboardBusy = true;
+  const y = scrollY;
+  try { await dashboardView(); scrollTo(0, y); } catch { /* ลองใหม่รอบหน้า */ } finally { dashboardBusy = false; }
+}
+setInterval(liveDashboard, DASHBOARD_REFRESH_MS);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) liveDashboard(); });
 
 async function show(tab) {
   if (!me) return;

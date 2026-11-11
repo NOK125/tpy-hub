@@ -1710,14 +1710,23 @@ def close_clinic(req, qid):
 # ---------- Dashboard และการส่งออก ----------
 
 def dashboard_data(conn, user, year):
-    staff = conn.execute(
-        "SELECT COUNT(*) AS total, SUM(must_change_password) AS not_activated FROM users WHERE active = 1").fetchone()
-    by_level = rows(conn.execute(
-        "SELECT COALESCE(NULLIF(level, ''), 'ไม่ระบุ') AS label, COUNT(*) AS n FROM users WHERE active = 1"
-        " GROUP BY label ORDER BY n DESC"))
-    by_position = rows(conn.execute(
-        "SELECT COALESCE(NULLIF(position, ''), 'ไม่ระบุ') AS label, COUNT(*) AS n FROM users WHERE active = 1"
-        " GROUP BY label ORDER BY n DESC LIMIT 10"))
+    # ใช้รายชื่อผู้ที่คงอยู่ชุดเดียวกับหน้าข้อมูลบุคลากรและอัตราการคงอยู่ (ไม่นับคนที่ลาออก/ย้ายออกแล้ว)
+    current = staff_rows(conn)
+    current_ids = [s["id"] for s in current]
+    not_activated = conn.execute(
+        f"SELECT COUNT(*) FROM users WHERE must_change_password = 1 AND id IN ({','.join('?' * len(current_ids))})",
+        current_ids).fetchone()[0] if current_ids else 0
+
+    def count_by(key, limit=None):
+        counts = {}
+        for s in current:
+            label = s[key] or UNSPECIFIED
+            counts[label] = counts.get(label, 0) + 1
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [{"label": k, "n": n} for k, n in ordered[:limit]]
+
+    by_level = count_by("level")
+    by_position = count_by("position", 10)
     plans = rows(conn.execute(PLAN_SELECT + " WHERE p.fiscal_year = ? ORDER BY p.seq", (year,)))
     for p in plans:
         p["remaining"] = p["budget"] - p["spent"]
@@ -1735,8 +1744,8 @@ def dashboard_data(conn, user, year):
             "SELECT DISTINCT fiscal_year FROM documents WHERE category = 'order' AND fiscal_year IS NOT NULL")},
             reverse=True),
         "generated_at": now(),
-        "staff_total": staff["total"],
-        "staff_not_activated": staff["not_activated"] or 0,
+        "staff_total": len(current),
+        "staff_not_activated": not_activated,
         "by_level": by_level,
         "by_position": by_position,
         "plans": plans,
